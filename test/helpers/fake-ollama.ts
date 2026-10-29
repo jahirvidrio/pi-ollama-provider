@@ -14,6 +14,8 @@ export interface FakeOllamaReply {
 	keepOpen?: boolean;
 	/** Accept the request but never answer, to test time-to-first-byte timeouts. */
 	hangHeaders?: boolean;
+	/** Send the headers then never write a body, to test body-idle timeouts. */
+	hangBody?: boolean;
 	/** Delay between streamed chunks, to observe incremental parsing. */
 	chunkDelayMs?: number;
 }
@@ -127,6 +129,11 @@ export async function startFakeOllama(options: FakeOllamaOptions = {}): Promise<
 			if (request.method === "POST" && path === "/api/chat") {
 				const reply = replies.shift() ?? { chunks: [DEFAULT_DONE_CHUNK] };
 				if (reply.hangHeaders) return;
+				if (reply.hangBody) {
+					response.writeHead(reply.status ?? 200, { "content-type": "application/x-ndjson" });
+					response.flushHeaders();
+					return;
+				}
 				if (reply.rawBody !== undefined) {
 					response.writeHead(reply.status ?? 200, { "content-type": "application/x-ndjson" });
 					response.write(reply.rawBody);

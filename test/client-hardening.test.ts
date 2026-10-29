@@ -66,6 +66,72 @@ describe("request timeout", () => {
 			await server.stop();
 		}
 	}, 10_000);
+
+	it("does not charge consumer time between chunks against the timeout", async () => {
+		const server = await startFakeOllama({
+			chat: {
+				chunks: [
+					{ message: { role: "assistant", content: "a" }, done: false },
+					{ message: { role: "assistant", content: "" }, done: true, done_reason: "stop" },
+				],
+				chunkDelayMs: 250,
+			},
+		});
+		try {
+			const client = new OllamaClient({ baseUrl: server.baseUrl, timeoutMs: 150 });
+			const iterator = client.chat(REQUEST);
+			const first = await iterator.next();
+			expect(first.value).toMatchObject({ message: { content: "a" } });
+
+			await new Promise((resolve) => setTimeout(resolve, 400));
+
+			const second = await iterator.next();
+			expect(second.value).toMatchObject({ done: true });
+		} finally {
+			await server.stop();
+		}
+	}, 10_000);
+
+	it("does not charge the onResponse hook against the timeout", async () => {
+		const server = await startFakeOllama({
+			chat: {
+				chunks: [
+					{ message: { role: "assistant", content: "a" }, done: false },
+					{ message: { role: "assistant", content: "" }, done: true, done_reason: "stop" },
+				],
+			},
+		});
+		try {
+			const client = new OllamaClient({
+				baseUrl: server.baseUrl,
+				timeoutMs: 150,
+				onResponse: async () => {
+					await new Promise((resolve) => setTimeout(resolve, 400));
+				},
+			});
+			const contents: string[] = [];
+			for await (const chunk of client.chat(REQUEST)) {
+				contents.push(chunk.message?.content ?? "");
+			}
+			expect(contents).toEqual(["a", ""]);
+		} finally {
+			await server.stop();
+		}
+	}, 10_000);
+
+	it("surfaces the timeout reason when an error body stalls", async () => {
+		const server = await startFakeOllama({ chat: { status: 500, hangBody: true } });
+		try {
+			const client = new OllamaClient({ baseUrl: server.baseUrl, timeoutMs: 150 });
+			const error = await client.chat(REQUEST).next().catch((cause: unknown) => cause);
+
+			expect(error).toBeInstanceOf(OllamaError);
+			expect((error as OllamaError).kind).toBe("network");
+			expect((error as OllamaError).message).toContain("timed out");
+		} finally {
+			await server.stop();
+		}
+	}, 10_000);
 });
 
 describe("caller cancellation", () => {

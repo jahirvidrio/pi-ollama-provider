@@ -157,9 +157,10 @@ export interface OllamaClientOptions {
 	/** Fetch implementation supplied by Pi for the current request. */
 	fetch?: typeof globalThis.fetch;
 	/**
-	 * Abort a chat request that goes this long without progress: from the request send
-	 * until the response headers arrive, and then between chunks. Pi passes its own
-	 * request timeout here.
+	 * Abort a chat request when the server goes this long without progress: from the
+	 * request send until the response headers arrive, and then while awaiting each body
+	 * chunk. Caller work (the `onResponse` hook and consuming yielded chunks) never counts
+	 * against it. Pi passes its own request timeout here.
 	 */
 	timeoutMs?: number;
 	/**
@@ -293,14 +294,22 @@ export class OllamaClient {
 					`Could not reach Ollama at ${this.baseUrl}: ${error instanceof Error ? error.message : String(error)}`,
 				);
 			}
-			// The headers are progress too: restart the window for the body. The read loop below
-			// rearms it again before every chunk.
+			// Headers are progress too: restart the window so a stalled error body and the wait
+			// for the first chunk stay covered. The read loop holds it on each awaited chunk.
 			armIdleTimer();
 			if (!response.ok) {
-				const text = await response.text().catch(() => "");
+				// A stalled error body surfaces the timeout that stopped it instead of an empty
+				// status line; other read failures keep the status-only message.
+				const text = await response.text().catch((error: unknown) => {
+					if (controller.signal.aborted) throw abortReason(error, signal, controller.signal);
+					return "";
+				});
 				throw new OllamaError("http", `${response.status}: ${providerMessage(text)}`, response.status);
 			}
 			if (this.onResponse) {
+				// Caller work never counts against the server: pause the window while the hook runs
+				// and let the read loop start it again right before the first chunk.
+				clearIdleTimer();
 				await this.onResponse({ status: response.status, headers: responseHeaders(response.headers) });
 			}
 			if (!response.body) {
@@ -312,8 +321,11 @@ export class OllamaClient {
 			let buffer = "";
 			try {
 				while (true) {
+					// Hold the window only while the client waits on the server: clearing it as soon
+					// as a chunk lands keeps decoding, parsing, and consumer time out of the budget.
 					armIdleTimer();
 					const { done, value } = await reader.read();
+					clearIdleTimer();
 					if (done) break;
 					buffer += decoder.decode(value, { stream: true });
 					let newline = buffer.indexOf("\n");
