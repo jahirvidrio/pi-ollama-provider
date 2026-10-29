@@ -352,12 +352,13 @@ export class OllamaClient {
 				// final chunk does not leave a connection open until the server closes it.
 				await reader.cancel().catch(() => undefined);
 				reader.releaseLock();
-				signal?.removeEventListener("abort", forwardAbort);
 			}
 		} finally {
-			// The window can be armed before the fetch, so every exit path (failed fetch, HTTP
-			// error, missing body, early generator return) must clear it.
+			// The window can be armed before the fetch and the caller abort listener is attached
+			// even earlier, so every exit path (failed fetch, HTTP error, missing body, early
+			// generator return) must release both.
 			clearIdleTimer();
+			signal?.removeEventListener("abort", forwardAbort);
 		}
 	}
 

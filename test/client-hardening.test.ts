@@ -1,3 +1,4 @@
+import { getEventListeners } from "node:events";
 import { describe, expect, it } from "vitest";
 import { OllamaClient, OllamaError } from "../src/client.ts";
 import { startFakeOllama } from "./helpers/fake-ollama.ts";
@@ -151,6 +152,67 @@ describe("caller cancellation", () => {
 		} finally {
 			await server.stop();
 		}
+	});
+
+	it("releases the caller abort listener after a completed chat", async () => {
+		const server = await startFakeOllama({
+			chat: {
+				chunks: [
+					{ message: { role: "assistant", content: "a" }, done: false },
+					{ message: { role: "assistant", content: "" }, done: true, done_reason: "stop" },
+				],
+			},
+		});
+		try {
+			const controller = new AbortController();
+			for await (const chunk of new OllamaClient({ baseUrl: server.baseUrl }).chat(REQUEST, controller.signal)) {
+				void chunk;
+			}
+			expect(getEventListeners(controller.signal, "abort")).toEqual([]);
+		} finally {
+			await server.stop();
+		}
+	});
+
+	it("releases the caller abort listener when the fetch fails", async () => {
+		const controller = new AbortController();
+		const client = new OllamaClient({
+			baseUrl: "http://127.0.0.1:1/api",
+			fetch: async () => {
+				throw new Error("connection failed");
+			},
+		});
+		const error = await client.chat(REQUEST, controller.signal).next().catch((cause: unknown) => cause);
+
+		expect(error).toBeInstanceOf(OllamaError);
+		expect((error as OllamaError).kind).toBe("network");
+		expect(getEventListeners(controller.signal, "abort")).toEqual([]);
+	});
+
+	it("releases the caller abort listener after an HTTP error", async () => {
+		const controller = new AbortController();
+		const client = new OllamaClient({
+			baseUrl: "http://127.0.0.1:1/api",
+			fetch: async () => new Response("boom", { status: 500 }),
+		});
+		const error = await client.chat(REQUEST, controller.signal).next().catch((cause: unknown) => cause);
+
+		expect(error).toBeInstanceOf(OllamaError);
+		expect((error as OllamaError).kind).toBe("http");
+		expect(getEventListeners(controller.signal, "abort")).toEqual([]);
+	});
+
+	it("releases the caller abort listener when the response has no body", async () => {
+		const controller = new AbortController();
+		const client = new OllamaClient({
+			baseUrl: "http://127.0.0.1:1/api",
+			fetch: async () => new Response(null, { status: 200 }),
+		});
+		const error = await client.chat(REQUEST, controller.signal).next().catch((cause: unknown) => cause);
+
+		expect(error).toBeInstanceOf(OllamaError);
+		expect((error as OllamaError).kind).toBe("protocol");
+		expect(getEventListeners(controller.signal, "abort")).toEqual([]);
 	});
 });
 
