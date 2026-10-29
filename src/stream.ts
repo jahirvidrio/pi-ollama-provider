@@ -187,6 +187,9 @@ export function streamOllamaChat(
 				baseUrl: model.baseUrl,
 				apiKey: options?.apiKey,
 				fetch: options?.fetch,
+				// Pi passes its provider request timeout here; the client applies it as the idle gap
+				// allowed between chunks, so a stalled server cannot hang the stream forever.
+				timeoutMs: options?.timeoutMs,
 				onResponse: options?.onResponse
 					? (response) => options.onResponse?.(response, model)
 					: undefined,
@@ -256,7 +259,9 @@ export function streamOllamaChat(
 
 			if (!finalChunk) {
 				// A stream that closes without `done` is a dropped connection, not a completion.
-				throw new OllamaError("stream", "Ollama closed the chat stream before sending a completion chunk");
+				// Phrased to match Pi's retryable "ended without" pattern, so a dropped connection
+				// is retried instead of surfacing as a dead turn.
+				throw new OllamaError("stream", "Ollama stream ended without a completion chunk");
 			}
 
 			closeBlocks();

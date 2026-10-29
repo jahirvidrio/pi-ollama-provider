@@ -8,6 +8,8 @@ export interface FakeOllamaReply {
 	chunks?: unknown[];
 	/** Lines written verbatim, for malformed-payload tests. */
 	rawChunks?: string[];
+	/** Body written byte-for-byte with no added newline, for EOF-boundary tests. */
+	rawBody?: string;
 	/** Keep the connection open after the last chunk so callers can test aborts. */
 	keepOpen?: boolean;
 	/** Delay between streamed chunks, to observe incremental parsing. */
@@ -122,6 +124,12 @@ export async function startFakeOllama(options: FakeOllamaOptions = {}): Promise<
 			}
 			if (request.method === "POST" && path === "/api/chat") {
 				const reply = replies.shift() ?? { chunks: [DEFAULT_DONE_CHUNK] };
+				if (reply.rawBody !== undefined) {
+					response.writeHead(reply.status ?? 200, { "content-type": "application/x-ndjson" });
+					response.write(reply.rawBody);
+					if (!reply.keepOpen) response.end();
+					return;
+				}
 				if (reply.rawChunks || reply.chunks) {
 					const lines = reply.rawChunks ?? (reply.chunks ?? []).map((chunk) => JSON.stringify(chunk));
 					await writeStream(response, lines, reply, controller.signal);

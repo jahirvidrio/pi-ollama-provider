@@ -102,14 +102,38 @@ function isAbort(error: unknown, signal: AbortSignal | undefined): boolean {
 	return error instanceof Error && error.name === "AbortError";
 }
 
+/**
+ * Chooses what to throw when a request or read stopped early: the caller's own abort keeps its
+ * `AbortError`, while a stream aborted by the idle timer keeps the `OllamaError` that names it.
+ */
+function abortReason(
+	error: unknown,
+	signal: AbortSignal | undefined,
+	controllerSignal: AbortSignal,
+): unknown {
+	if (signal?.aborted) return signal.reason ?? error;
+	const reason = controllerSignal.reason;
+	return reason instanceof OllamaError ? reason : error;
+}
+
+/** Same cap Pi's `error-body` helper applies, so a hostile or buggy server cannot inflate the transcript. */
+const MAX_ERROR_BODY_CHARS = 4000;
+
+function capErrorBody(text: string): string {
+	const trimmed = text.trim();
+	if (trimmed.length <= MAX_ERROR_BODY_CHARS) return trimmed;
+	return `${trimmed.slice(0, MAX_ERROR_BODY_CHARS)}… [truncated ${trimmed.length - MAX_ERROR_BODY_CHARS} chars]`;
+}
+
 function providerMessage(text: string): string {
+	const capped = capErrorBody(text);
 	try {
-		const parsed = JSON.parse(text) as { error?: unknown };
-		if (typeof parsed.error === "string") return parsed.error;
+		const parsed = JSON.parse(capped) as { error?: unknown };
+		if (typeof parsed.error === "string") return capErrorBody(parsed.error);
 	} catch {
-		// Not JSON: the raw body is the best description available.
+		// Not JSON: the capped raw body is the best description available.
 	}
-	return text.trim();
+	return capped;
 }
 
 /** Status and headers of an Ollama HTTP response, mirroring Pi's `ProviderResponse`. */
@@ -133,6 +157,11 @@ export interface OllamaClientOptions {
 	/** Fetch implementation supplied by Pi for the current request. */
 	fetch?: typeof globalThis.fetch;
 	/**
+	 * Abort a chat stream that goes this long without data, measured from the request and
+	 * reset on every chunk. Pi passes its own request timeout here.
+	 */
+	timeoutMs?: number;
+	/**
 	 * Called once the chat response headers arrive and before its body is consumed, so
 	 * callers can observe the request the way Pi's `onResponse` hook expects. Only the
 	 * chat request reports a response: the other endpoints return their body at once.
@@ -145,12 +174,14 @@ export class OllamaClient {
 	private readonly apiKey: string | undefined;
 	private readonly fetchImpl: typeof globalThis.fetch;
 	private readonly onResponse: OllamaClientOptions["onResponse"];
+	private readonly timeoutMs: number | undefined;
 
 	constructor(options: OllamaClientOptions) {
 		this.baseUrl = normalizeOllamaBaseUrl(options.baseUrl);
 		this.apiKey = options.apiKey;
 		this.fetchImpl = options.fetch ?? globalThis.fetch;
 		this.onResponse = options.onResponse;
+		this.timeoutMs = options.timeoutMs;
 	}
 
 	private headers(extra?: Record<string, string>): Record<string, string> {
@@ -220,16 +251,33 @@ export class OllamaClient {
 	 * inside the stream and never changes the HTTP status.
 	 */
 	async *chat(request: OllamaChatRequest, signal?: AbortSignal): AsyncGenerator<OllamaChatChunk> {
+		const controller = new AbortController();
+		const forwardAbort = (): void => controller.abort(signal?.reason);
+		signal?.addEventListener("abort", forwardAbort, { once: true });
+		let idleTimer: ReturnType<typeof setTimeout> | undefined;
+		const clearIdleTimer = (): void => {
+			if (idleTimer) clearTimeout(idleTimer);
+			idleTimer = undefined;
+		};
+		const armIdleTimer = (): void => {
+			if (this.timeoutMs === undefined || this.timeoutMs <= 0) return;
+			clearIdleTimer();
+			idleTimer = setTimeout(() => {
+				controller.abort(
+					new OllamaError("network", `Ollama stream timed out after ${this.timeoutMs}ms without data`),
+				);
+			}, this.timeoutMs);
+		};
 		let response: Response;
 		try {
 			response = await this.fetchImpl(`${this.baseUrl}/chat`, {
 				method: "POST",
 				headers: this.headers({ "content-type": "application/json" }),
 				body: JSON.stringify({ ...request, stream: true }),
-				signal,
+				signal: controller.signal,
 			});
 		} catch (error) {
-			if (isAbort(error, signal)) throw error;
+			if (isAbort(error, signal) || controller.signal.aborted) throw abortReason(error, signal, controller.signal);
 			throw new OllamaError(
 				"network",
 				`Could not reach Ollama at ${this.baseUrl}: ${error instanceof Error ? error.message : String(error)}`,
@@ -251,6 +299,7 @@ export class OllamaClient {
 		let buffer = "";
 		try {
 			while (true) {
+				armIdleTimer();
 				const { done, value } = await reader.read();
 				if (done) break;
 				buffer += decoder.decode(value, { stream: true });
@@ -266,14 +315,19 @@ export class OllamaClient {
 			const tail = buffer.trim();
 			if (tail.length > 0) yield this.parseChunk(tail);
 		} catch (error) {
-			if (isAbort(error, signal)) throw error;
+			if (isAbort(error, signal) || controller.signal.aborted) throw abortReason(error, signal, controller.signal);
 			if (error instanceof OllamaError) throw error;
 			throw new OllamaError(
 				"stream",
 				`Ollama chat stream failed: ${error instanceof Error ? error.message : String(error)}`,
 			);
 		} finally {
+			clearIdleTimer();
+			// Release the socket instead of only unlocking the reader, so an early break on the
+			// final chunk does not leave a connection open until the server closes it.
+			await reader.cancel().catch(() => undefined);
 			reader.releaseLock();
+			signal?.removeEventListener("abort", forwardAbort);
 		}
 	}
 
