@@ -21,10 +21,16 @@ export interface RecordedRequest {
 	body: unknown;
 }
 
+/**
+ * `/api/show` payload: either a fixed object, or a function of the parsed request body
+ * for tests that need a different payload per model.
+ */
+export type FakeShowResponder = (body: Record<string, unknown>) => unknown;
+
 export interface FakeOllamaOptions {
 	version?: string;
 	tags?: unknown;
-	show?: unknown;
+	show?: object | FakeShowResponder;
 	/** First queued chat answer, equivalent to calling `respond()` right after startup. */
 	chat?: FakeOllamaReply;
 }
@@ -37,10 +43,6 @@ export interface FakeOllama {
 	requests: RecordedRequest[];
 	/** Queue the next `POST /api/chat` answer. */
 	respond(reply: FakeOllamaReply): void;
-	/** Replace the `GET /api/tags` payload. */
-	setTags(payload: unknown): void;
-	/** Replace the `POST /api/show` payload. */
-	setShow(payload: unknown): void;
 	stop(): Promise<void>;
 }
 
@@ -114,7 +116,8 @@ export async function startFakeOllama(options: FakeOllamaOptions = {}): Promise<
 				return;
 			}
 			if (request.method === "POST" && path === "/api/show") {
-				writeJson(response, 200, show);
+				const payload = typeof show === "function" ? show(body) : show;
+				writeJson(response, 200, payload);
 				return;
 			}
 			if (request.method === "POST" && path === "/api/chat") {
@@ -141,12 +144,6 @@ export async function startFakeOllama(options: FakeOllamaOptions = {}): Promise<
 		requests,
 		respond: (reply) => {
 			replies.push(reply);
-		},
-		setTags: (payload) => {
-			tags = payload;
-		},
-		setShow: (payload) => {
-			show = payload;
 		},
 		stop: async () => {
 			for (const controller of inFlight) controller.abort();
