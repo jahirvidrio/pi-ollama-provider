@@ -27,6 +27,45 @@ describe("request timeout", () => {
 			await server.stop();
 		}
 	}, 10_000);
+
+	it("aborts a request whose headers never arrive, and names the timeout", async () => {
+		const server = await startFakeOllama({ chat: { hangHeaders: true } });
+		try {
+			const client = new OllamaClient({ baseUrl: server.baseUrl, timeoutMs: 150 });
+			const startedAt = Date.now();
+			const error = await client.chat(REQUEST).next().catch((cause: unknown) => cause);
+			const elapsed = Date.now() - startedAt;
+
+			expect(error).toBeInstanceOf(OllamaError);
+			expect((error as OllamaError).message).toContain("timed out");
+			expect(elapsed).toBeLessThan(2_000);
+		} finally {
+			await server.stop();
+		}
+	}, 10_000);
+
+	it("lets a stream finish when every chunk arrives inside the window", async () => {
+		const server = await startFakeOllama({
+			chat: {
+				chunks: [
+					{ message: { role: "assistant", content: "a" }, done: false },
+					{ message: { role: "assistant", content: "b" }, done: false },
+					{ message: { role: "assistant", content: "" }, done: true, done_reason: "stop" },
+				],
+				chunkDelayMs: 50,
+			},
+		});
+		try {
+			const contents: string[] = [];
+			const client = new OllamaClient({ baseUrl: server.baseUrl, timeoutMs: 150 });
+			for await (const chunk of client.chat(REQUEST)) {
+				contents.push(chunk.message?.content ?? "");
+			}
+			expect(contents).toEqual(["a", "b", ""]);
+		} finally {
+			await server.stop();
+		}
+	}, 10_000);
 });
 
 describe("caller cancellation", () => {

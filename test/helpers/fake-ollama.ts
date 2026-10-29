@@ -12,6 +12,8 @@ export interface FakeOllamaReply {
 	rawBody?: string;
 	/** Keep the connection open after the last chunk so callers can test aborts. */
 	keepOpen?: boolean;
+	/** Accept the request but never answer, to test time-to-first-byte timeouts. */
+	hangHeaders?: boolean;
 	/** Delay between streamed chunks, to observe incremental parsing. */
 	chunkDelayMs?: number;
 }
@@ -124,6 +126,7 @@ export async function startFakeOllama(options: FakeOllamaOptions = {}): Promise<
 			}
 			if (request.method === "POST" && path === "/api/chat") {
 				const reply = replies.shift() ?? { chunks: [DEFAULT_DONE_CHUNK] };
+				if (reply.hangHeaders) return;
 				if (reply.rawBody !== undefined) {
 					response.writeHead(reply.status ?? 200, { "content-type": "application/x-ndjson" });
 					response.write(reply.rawBody);

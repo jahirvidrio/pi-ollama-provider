@@ -187,8 +187,9 @@ export function streamOllamaChat(
 				baseUrl: model.baseUrl,
 				apiKey: options?.apiKey,
 				fetch: options?.fetch,
-				// Pi passes its provider request timeout here; the client applies it as the idle gap
-				// allowed between chunks, so a stalled server cannot hang the stream forever.
+				// Pi passes its provider request timeout here; the client applies it from the
+				// request send through the headers and then as the idle gap between chunks, so a
+				// hung or stalled server cannot hold the stream forever.
 				timeoutMs: options?.timeoutMs,
 				onResponse: options?.onResponse
 					? (response) => options.onResponse?.(response, model)

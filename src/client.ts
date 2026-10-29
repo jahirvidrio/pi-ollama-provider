@@ -157,8 +157,9 @@ export interface OllamaClientOptions {
 	/** Fetch implementation supplied by Pi for the current request. */
 	fetch?: typeof globalThis.fetch;
 	/**
-	 * Abort a chat stream that goes this long without data, measured from the request and
-	 * reset on every chunk. Pi passes its own request timeout here.
+	 * Abort a chat request that goes this long without progress: from the request send
+	 * until the response headers arrive, and then between chunks. Pi passes its own
+	 * request timeout here.
 	 */
 	timeoutMs?: number;
 	/**
@@ -273,64 +274,78 @@ export class OllamaClient {
 		};
 		let response: Response;
 		try {
-			response = await this.fetchImpl(`${this.baseUrl}/chat`, {
-				method: "POST",
-				headers: this.headers({ "content-type": "application/json" }),
-				body: JSON.stringify({ ...request, stream: true }),
-				signal: controller.signal,
-			});
-		} catch (error) {
-			if (isAbort(error, signal) || controller.signal.aborted) throw abortReason(error, signal, controller.signal);
-			throw new OllamaError(
-				"network",
-				`Could not reach Ollama at ${this.baseUrl}: ${error instanceof Error ? error.message : String(error)}`,
-			);
-		}
-		if (!response.ok) {
-			const text = await response.text().catch(() => "");
-			throw new OllamaError("http", `${response.status}: ${providerMessage(text)}`, response.status);
-		}
-		if (this.onResponse) {
-			await this.onResponse({ status: response.status, headers: responseHeaders(response.headers) });
-		}
-		if (!response.body) {
-			throw new OllamaError("protocol", "Ollama /api/chat returned no response body");
-		}
-
-		const reader = response.body.getReader();
-		const decoder = new TextDecoder();
-		let buffer = "";
-		try {
-			while (true) {
-				armIdleTimer();
-				const { done, value } = await reader.read();
-				if (done) break;
-				buffer += decoder.decode(value, { stream: true });
-				let newline = buffer.indexOf("\n");
-				while (newline >= 0) {
-					const line = buffer.slice(0, newline).trim();
-					buffer = buffer.slice(newline + 1);
-					if (line.length > 0) yield this.parseChunk(line);
-					newline = buffer.indexOf("\n");
-				}
+			// Start the window before the fetch: a server that accepts the connection but never
+			// answers (hung proxy, model still loading before its first byte) would otherwise stall
+			// the request forever, because the read loop that arms the timer only starts once the
+			// headers arrive.
+			armIdleTimer();
+			try {
+				response = await this.fetchImpl(`${this.baseUrl}/chat`, {
+					method: "POST",
+					headers: this.headers({ "content-type": "application/json" }),
+					body: JSON.stringify({ ...request, stream: true }),
+					signal: controller.signal,
+				});
+			} catch (error) {
+				if (isAbort(error, signal) || controller.signal.aborted) throw abortReason(error, signal, controller.signal);
+				throw new OllamaError(
+					"network",
+					`Could not reach Ollama at ${this.baseUrl}: ${error instanceof Error ? error.message : String(error)}`,
+				);
 			}
-			buffer += decoder.decode();
-			const tail = buffer.trim();
-			if (tail.length > 0) yield this.parseChunk(tail);
-		} catch (error) {
-			if (isAbort(error, signal) || controller.signal.aborted) throw abortReason(error, signal, controller.signal);
-			if (error instanceof OllamaError) throw error;
-			throw new OllamaError(
-				"stream",
-				`Ollama chat stream failed: ${error instanceof Error ? error.message : String(error)}`,
-			);
+			// The headers are progress too: restart the window for the body. The read loop below
+			// rearms it again before every chunk.
+			armIdleTimer();
+			if (!response.ok) {
+				const text = await response.text().catch(() => "");
+				throw new OllamaError("http", `${response.status}: ${providerMessage(text)}`, response.status);
+			}
+			if (this.onResponse) {
+				await this.onResponse({ status: response.status, headers: responseHeaders(response.headers) });
+			}
+			if (!response.body) {
+				throw new OllamaError("protocol", "Ollama /api/chat returned no response body");
+			}
+
+			const reader = response.body.getReader();
+			const decoder = new TextDecoder();
+			let buffer = "";
+			try {
+				while (true) {
+					armIdleTimer();
+					const { done, value } = await reader.read();
+					if (done) break;
+					buffer += decoder.decode(value, { stream: true });
+					let newline = buffer.indexOf("\n");
+					while (newline >= 0) {
+						const line = buffer.slice(0, newline).trim();
+						buffer = buffer.slice(newline + 1);
+						if (line.length > 0) yield this.parseChunk(line);
+						newline = buffer.indexOf("\n");
+					}
+				}
+				buffer += decoder.decode();
+				const tail = buffer.trim();
+				if (tail.length > 0) yield this.parseChunk(tail);
+			} catch (error) {
+				if (isAbort(error, signal) || controller.signal.aborted) throw abortReason(error, signal, controller.signal);
+				if (error instanceof OllamaError) throw error;
+				throw new OllamaError(
+					"stream",
+					`Ollama chat stream failed: ${error instanceof Error ? error.message : String(error)}`,
+				);
+			} finally {
+				clearIdleTimer();
+				// Release the socket instead of only unlocking the reader, so an early break on the
+				// final chunk does not leave a connection open until the server closes it.
+				await reader.cancel().catch(() => undefined);
+				reader.releaseLock();
+				signal?.removeEventListener("abort", forwardAbort);
+			}
 		} finally {
+			// The window can be armed before the fetch, so every exit path (failed fetch, HTTP
+			// error, missing body, early generator return) must clear it.
 			clearIdleTimer();
-			// Release the socket instead of only unlocking the reader, so an early break on the
-			// final chunk does not leave a connection open until the server closes it.
-			await reader.cancel().catch(() => undefined);
-			reader.releaseLock();
-			signal?.removeEventListener("abort", forwardAbort);
 		}
 	}
 
