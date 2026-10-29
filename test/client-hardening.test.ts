@@ -29,6 +29,26 @@ describe("request timeout", () => {
 	}, 10_000);
 });
 
+describe("caller cancellation", () => {
+	it("rejects without sending when the caller signal is already aborted", async () => {
+		const server = await startFakeOllama();
+		try {
+			const controller = new AbortController();
+			controller.abort();
+
+			const error = await new OllamaClient({ baseUrl: server.baseUrl })
+				.chat(REQUEST, controller.signal)
+				.next()
+				.catch((cause: unknown) => cause);
+
+			expect((error as Error).name).toBe("AbortError");
+			expect(server.requests).toHaveLength(0);
+		} finally {
+			await server.stop();
+		}
+	});
+});
+
 describe("error bodies", () => {
 	it("caps a huge error body instead of keeping all of it", async () => {
 		const server = await startFakeOllama({ chat: { status: 500, body: { error: "x".repeat(2_000_000) } } });

@@ -254,6 +254,9 @@ export class OllamaClient {
 		const controller = new AbortController();
 		const forwardAbort = (): void => controller.abort(signal?.reason);
 		signal?.addEventListener("abort", forwardAbort, { once: true });
+		// A signal that is already aborted never fires the listener, so mirror the caller's state
+		// before the fetch instead of letting a cancelled request start.
+		if (signal?.aborted) forwardAbort();
 		let idleTimer: ReturnType<typeof setTimeout> | undefined;
 		const clearIdleTimer = (): void => {
 			if (idleTimer) clearTimeout(idleTimer);
