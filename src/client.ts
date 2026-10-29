@@ -112,23 +112,45 @@ function providerMessage(text: string): string {
 	return text.trim();
 }
 
+/** Status and headers of an Ollama HTTP response, mirroring Pi's `ProviderResponse`. */
+export interface OllamaResponseInfo {
+	status: number;
+	headers: Record<string, string>;
+}
+
+function responseHeaders(headers: Headers): Record<string, string> {
+	const record: Record<string, string> = {};
+	headers.forEach((value, key) => {
+		record[key] = value;
+	});
+	return record;
+}
+
 export interface OllamaClientOptions {
 	/** Origin or `/api` base URL; normalized before use. */
 	baseUrl: string;
 	apiKey?: string;
 	/** Fetch implementation supplied by Pi for the current request. */
 	fetch?: typeof globalThis.fetch;
+	/**
+	 * Called once the chat response headers arrive and before its body is consumed, so
+	 * callers can observe the request the way Pi's `onResponse` hook expects. Only the
+	 * chat request reports a response: the other endpoints return their body at once.
+	 */
+	onResponse?: (response: OllamaResponseInfo) => void | Promise<void>;
 }
 
 export class OllamaClient {
 	readonly baseUrl: string;
 	private readonly apiKey: string | undefined;
 	private readonly fetchImpl: typeof globalThis.fetch;
+	private readonly onResponse: OllamaClientOptions["onResponse"];
 
 	constructor(options: OllamaClientOptions) {
 		this.baseUrl = normalizeOllamaBaseUrl(options.baseUrl);
 		this.apiKey = options.apiKey;
 		this.fetchImpl = options.fetch ?? globalThis.fetch;
+		this.onResponse = options.onResponse;
 	}
 
 	private headers(extra?: Record<string, string>): Record<string, string> {
@@ -216,6 +238,9 @@ export class OllamaClient {
 		if (!response.ok) {
 			const text = await response.text().catch(() => "");
 			throw new OllamaError("http", `${response.status}: ${providerMessage(text)}`, response.status);
+		}
+		if (this.onResponse) {
+			await this.onResponse({ status: response.status, headers: responseHeaders(response.headers) });
 		}
 		if (!response.body) {
 			throw new OllamaError("protocol", "Ollama /api/chat returned no response body");
