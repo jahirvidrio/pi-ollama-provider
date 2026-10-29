@@ -6,6 +6,8 @@ export interface FakeOllamaReply {
 	status?: number;
 	body?: unknown;
 	chunks?: unknown[];
+	/** Lines written verbatim, for malformed-payload tests. */
+	rawChunks?: string[];
 	/** Keep the connection open after the last chunk so callers can test aborts. */
 	keepOpen?: boolean;
 	/** Delay between streamed chunks, to observe incremental parsing. */
@@ -67,7 +69,7 @@ function writeJson(response: ServerResponse, status: number, payload: unknown): 
 
 async function writeStream(
 	response: ServerResponse,
-	chunks: unknown[],
+	chunks: string[],
 	reply: FakeOllamaReply,
 	signal: AbortSignal,
 ): Promise<void> {
@@ -75,7 +77,7 @@ async function writeStream(
 	const delay = reply.chunkDelayMs ?? 0;
 	for (const chunk of chunks) {
 		if (signal.aborted) return;
-		response.write(`${JSON.stringify(chunk)}\n`);
+		response.write(`${chunk}\n`);
 		if (delay > 0) {
 			await new Promise((resolve) => setTimeout(resolve, delay));
 		}
@@ -117,8 +119,9 @@ export async function startFakeOllama(options: FakeOllamaOptions = {}): Promise<
 			}
 			if (request.method === "POST" && path === "/api/chat") {
 				const reply = replies.shift() ?? { chunks: [DEFAULT_DONE_CHUNK] };
-				if (reply.chunks) {
-					await writeStream(response, reply.chunks, reply, controller.signal);
+				if (reply.rawChunks || reply.chunks) {
+					const lines = reply.rawChunks ?? (reply.chunks ?? []).map((chunk) => JSON.stringify(chunk));
+					await writeStream(response, lines, reply, controller.signal);
 					return;
 				}
 				writeJson(response, reply.status ?? 200, reply.body ?? {});
