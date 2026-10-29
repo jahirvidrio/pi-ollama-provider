@@ -368,4 +368,21 @@ describe("streamOllamaChat", () => {
 			await server.stop();
 		}
 	});
+
+	it("reports a stream that ends without a completion chunk as an error", async () => {
+		const server = await startFakeOllama({
+			chat: { chunks: [{ message: { role: "assistant", content: "partial" }, done: false }] },
+		});
+		try {
+			const events = await collect(streamOllamaChat(model({ baseUrl: server.baseUrl }), context()));
+
+			expect(events.at(-1)?.type).toBe("error");
+			const message = lastMessage(events);
+			expect(message.stopReason).toBe("error");
+			expect(message.errorMessage).toContain("completion chunk");
+			expect(message.content).toEqual([{ type: "text", text: "partial" }]);
+		} finally {
+			await server.stop();
+		}
+	});
 });

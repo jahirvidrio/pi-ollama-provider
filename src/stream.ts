@@ -254,6 +254,11 @@ export function streamOllamaChat(
 				}
 			}
 
+			if (!finalChunk) {
+				// A stream that closes without `done` is a dropped connection, not a completion.
+				throw new OllamaError("stream", "Ollama closed the chat stream before sending a completion chunk");
+			}
+
 			closeBlocks();
 			const hasToolCall = output.content.some((block) => block.type === "toolCall");
 			const reason: "stop" | "length" | "toolUse" =
