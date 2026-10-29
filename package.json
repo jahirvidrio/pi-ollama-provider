@@ -1,0 +1,43 @@
+{
+	"name": "pi-ollama-provider",
+	"version": "0.1.0",
+	"description": "Native Ollama provider for Pi: local and Ollama Cloud through the Ollama API",
+	"type": "module",
+	"license": "MIT",
+	"keywords": [
+		"pi-package",
+		"pi",
+		"ollama",
+		"provider"
+	],
+	"pi": {
+		"extensions": [
+			"./extensions/ollama/index.ts"
+		]
+	},
+	"files": [
+		"extensions",
+		"src",
+		"README.md",
+		"LICENSE"
+	],
+	"scripts": {
+		"test": "vitest --run",
+		"test:watch": "vitest",
+		"typecheck": "tsc --noEmit"
+	},
+	"peerDependencies": {
+		"@earendil-works/pi-ai": "*",
+		"@earendil-works/pi-coding-agent": "*"
+	},
+	"devDependencies": {
+		"@earendil-works/pi-ai": "1.4.0",
+		"@earendil-works/pi-coding-agent": "1.4.0",
+		"@types/node": "22.19.19",
+		"typescript": "7.0.2",
+		"vitest": "5.0.5"
+	},
+	"engines": {
+		"node": ">=22.19.0"
+	}
+}
