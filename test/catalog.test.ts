@@ -23,7 +23,7 @@ function shows(): unknown {
 
 describe("toChatModel", () => {
 	it("maps context window, capabilities and named thinking levels", () => {
-		const { model, metadata } = toChatModel({
+		const model = toChatModel({
 			summary: { name: "gpt-oss:20b", model: "gpt-oss:20b", capabilities: ["completion", "vision", "thinking"] },
 			show: {
 				model_info: { "gptoss.context_length": 131072 },
@@ -31,7 +31,6 @@ describe("toChatModel", () => {
 			},
 			providerId: "ollama",
 			baseUrl: "http://localhost:11434/api",
-			kind: "local",
 		});
 
 		expect(model).toMatchObject({
@@ -55,17 +54,14 @@ describe("toChatModel", () => {
 			xhigh: null,
 			max: null,
 		});
-		expect(metadata.thinking?.values).toEqual(["low", "medium", "high"]);
-		expect(metadata.numCtx).toBe(131072);
 	});
 
 	it("offers off and one on level for a boolean-only thinking model", () => {
-		const { model, metadata } = toChatModel({
+		const model = toChatModel({
 			summary: { name: "gpt-oss:20b", model: "gpt-oss:20b", capabilities: ["completion", "thinking"] },
 			show: { thinking: { values: [false, true], default: true } },
 			providerId: "ollama-cloud",
 			baseUrl: "https://ollama.com/api",
-			kind: "cloud",
 		});
 
 		expect(model.reasoning).toBe(true);
@@ -73,21 +69,19 @@ describe("toChatModel", () => {
 			off: "off",
 			minimal: null,
 			low: null,
-			medium: "medium",
+			medium: "true",
 			high: null,
 			xhigh: null,
 			max: null,
 		});
-		expect(metadata.thinking?.values).toEqual([false, true]);
 	});
 
 	it("falls back to conservative defaults without show metadata", () => {
-		const { model, metadata } = toChatModel({
+		const model = toChatModel({
 			summary: { name: "gemma4:31b", model: "gemma4:31b" },
 			show: {},
 			providerId: "ollama",
 			baseUrl: "http://localhost:11434/api",
-			kind: "local",
 		});
 
 		expect(model.contextWindow).toBe(4096);
@@ -95,20 +89,6 @@ describe("toChatModel", () => {
 		expect(model.reasoning).toBe(false);
 		expect(model.thinkingLevelMap).toBeUndefined();
 		expect(model.input).toEqual(["text"]);
-		expect(metadata.thinking).toBeUndefined();
-		expect(metadata.numCtx).toBe(4096);
-	});
-
-	it("does not send num_ctx or keep_alive for cloud models", () => {
-		const { metadata } = toChatModel({
-			summary: { name: "gpt-oss:20b", model: "gpt-oss:20b" },
-			show: { model_info: { "gptoss.context_length": 131072 } },
-			providerId: "ollama-cloud",
-			baseUrl: "https://ollama.com/api",
-			kind: "cloud",
-		});
-
-		expect(metadata.numCtx).toBeUndefined();
 	});
 });
 
@@ -119,10 +99,9 @@ describe("loadCatalog", () => {
 			show: (body) => (body.model === "gpt-oss:20b" ? shows() : { capabilities: ["completion"] }),
 		});
 		try {
-			const { models } = await loadCatalog({
+			const models = await loadCatalog({
 				client: new OllamaClient({ baseUrl: server.baseUrl }),
 				providerId: "ollama",
-				kind: "local",
 				allowNetwork: true,
 			});
 
@@ -149,10 +128,9 @@ describe("loadCatalog", () => {
 			},
 		];
 		try {
-			const { models } = await loadCatalog({
+			const models = await loadCatalog({
 				client: new OllamaClient({ baseUrl: server.baseUrl }),
 				providerId: "ollama",
-				kind: "local",
 				allowNetwork: false,
 				stored,
 			});

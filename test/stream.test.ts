@@ -2,11 +2,12 @@ import { describe, expect, it } from "vitest";
 import {
 	type AssistantMessageEvent,
 	type Model,
+	type ThinkingLevelMap,
 	type Tool,
 	isContextOverflow,
 	normalizeContext,
 } from "@earendil-works/pi-ai";
-import { streamOllamaChat, type OllamaStreamMetadata } from "../src/stream.ts";
+import { streamOllamaChat, type OllamaStreamOptions } from "../src/stream.ts";
 import { startFakeOllama } from "./helpers/fake-ollama.ts";
 
 const ZERO_COST = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
@@ -46,6 +47,55 @@ function lastMessage(events: AssistantMessageEvent[]) {
 	if (terminal?.type === "done") return terminal.message;
 	if (terminal?.type === "error") return terminal.error;
 	throw new Error("stream did not terminate");
+}
+
+/** What `/api/show` reports for `gpt-oss`: real level names the model accepts. */
+const NAMED_LEVELS: ThinkingLevelMap = {
+	off: "off",
+	minimal: null,
+	low: "low",
+	medium: "medium",
+	high: "high",
+	xhigh: null,
+	max: null,
+};
+
+/** What `catalog.ts` derives for a model that only reports `thinking.values: [false, true]`. */
+const BOOLEAN_ONLY: ThinkingLevelMap = {
+	off: "off",
+	minimal: null,
+	low: null,
+	medium: "true",
+	high: null,
+	xhigh: null,
+	max: null,
+};
+
+/** Streams one request against a fake server and returns the JSON body it received. */
+async function sentRequest(
+	input: {
+		model?: Partial<Model<"ollama-chat">>;
+		options?: OllamaStreamOptions;
+		config?: { kind: "local" | "cloud" };
+		tools?: Tool[];
+	} = {},
+): Promise<Record<string, unknown>> {
+	const server = await startFakeOllama({
+		chat: { chunks: [{ message: { role: "assistant", content: "ok" }, done: true, done_reason: "stop" }] },
+	});
+	try {
+		await collect(
+			streamOllamaChat(
+				model({ baseUrl: server.baseUrl, ...input.model }),
+				context(input.tools),
+				input.options,
+				input.config,
+			),
+		);
+		return (server.requests[0]?.body ?? {}) as Record<string, unknown>;
+	} finally {
+		await server.stop();
+	}
 }
 
 describe("streamOllamaChat", () => {
@@ -223,36 +273,64 @@ describe("streamOllamaChat", () => {
 		}
 	});
 
-	it("sends think, num_ctx, num_predict and tools when configured", async () => {
-		const server = await startFakeOllama({
-			chat: { chunks: [{ message: { role: "assistant", content: "ok" }, done: true, done_reason: "stop" }] },
-		});
-		const metadata: OllamaStreamMetadata = {
-			numCtx: 131072,
-			keepAlive: "5m",
-			thinking: { values: ["low", "medium", "high"], default: "medium" },
-		};
+	it("sends think from the model map, num_ctx for local, num_predict and tools", async () => {
 		const tools: Tool[] = [
 			{ name: "read", description: "Read a file", parameters: { type: "object", properties: {} } as Tool["parameters"] },
 		];
-		try {
-			await collect(
-				streamOllamaChat(model({ baseUrl: server.baseUrl, reasoning: true }), context(tools), {
-					reasoning: "medium",
-					maxTokens: 512,
-					samplingParams: { top_p: 0.9, top_k: 40 },
-				}, metadata),
-			);
+		const body = await sentRequest({
+			model: { reasoning: true, thinkingLevelMap: NAMED_LEVELS },
+			options: { reasoning: "medium", maxTokens: 512, samplingParams: { top_p: 0.9, top_k: 40 } },
+			config: { kind: "local" },
+			tools,
+		});
 
-			expect(server.requests[0]?.body).toMatchObject({
-				think: "medium",
-				keep_alive: "5m",
-				options: { num_ctx: 131072, num_predict: 512, top_p: 0.9, top_k: 40 },
-				tools: [{ type: "function", function: { name: "read", description: "Read a file" } }],
-			});
-		} finally {
-			await server.stop();
-		}
+		expect(body).toMatchObject({
+			think: "medium",
+			options: { num_ctx: 131072, num_predict: 512, top_p: 0.9, top_k: 40 },
+			tools: [{ type: "function", function: { name: "read", description: "Read a file" } }],
+		});
+		expect(body).toHaveProperty("options.num_ctx", 131072);
+		expect(body).not.toHaveProperty("keep_alive");
+	});
+
+	it("omits num_ctx and keep_alive for a cloud request", async () => {
+		const body = await sentRequest({ config: { kind: "cloud" } });
+		expect(body).not.toHaveProperty("options");
+		expect(body).not.toHaveProperty("keep_alive");
+	});
+
+	it("sends the model's own level name verbatim for an enabled level", async () => {
+		const renamed = { ...NAMED_LEVELS, high: "thinking_hard" };
+		expect((await sentRequest({ model: { reasoning: true, thinkingLevelMap: NAMED_LEVELS }, options: { reasoning: "high" } })).think).toBe(
+			"high",
+		);
+		expect((await sentRequest({ model: { reasoning: true, thinkingLevelMap: renamed }, options: { reasoning: "high" } })).think).toBe(
+			"thinking_hard",
+		);
+	});
+
+	it("sends boolean false for off only when the model supports turning thinking off", async () => {
+		expect((await sentRequest({ model: { reasoning: true, thinkingLevelMap: NAMED_LEVELS }, options: { reasoning: "off" } })).think).toBe(
+			false,
+		);
+		const offUnsupported = { ...NAMED_LEVELS, off: null };
+		expect(await sentRequest({ model: { reasoning: true, thinkingLevelMap: offUnsupported }, options: { reasoning: "off" } })).not.toHaveProperty(
+			"think",
+		);
+	});
+
+	it("sends boolean true for a boolean-only thinking model", async () => {
+		expect(
+			(await sentRequest({ model: { reasoning: true, thinkingLevelMap: BOOLEAN_ONLY }, options: { reasoning: "medium" } })).think,
+		).toBe(true);
+	});
+
+	it("omits think for an unsupported level, an unset level or a model without thinking", async () => {
+		expect(await sentRequest({ model: { reasoning: true, thinkingLevelMap: NAMED_LEVELS }, options: { reasoning: "max" } })).not.toHaveProperty(
+			"think",
+		);
+		expect(await sentRequest({ model: {}, options: { reasoning: "medium" } })).not.toHaveProperty("think");
+		expect(await sentRequest({ model: { reasoning: true, thinkingLevelMap: NAMED_LEVELS } })).not.toHaveProperty("think");
 	});
 
 	it("lets onPayload replace the request body before sending", async () => {

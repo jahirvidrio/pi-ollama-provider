@@ -2,7 +2,7 @@
 
 import type { Model, ModelInputModality, ThinkingLevel, ThinkingLevelMap } from "@earendil-works/pi-ai";
 import type { OllamaClient, OllamaModelSummary, OllamaShowResponse } from "./client.ts";
-import { OLLAMA_CHAT_API, type OllamaStreamMetadata } from "./stream.ts";
+import { OLLAMA_CHAT_API } from "./stream.ts";
 
 /**
  * Context window used when `/api/show` reports no `*.context_length`, so a model
@@ -20,8 +20,6 @@ export interface ToChatModelInput {
 	show: OllamaShowResponse;
 	providerId: string;
 	baseUrl: string;
-	kind: "local" | "cloud";
-	keepAlive?: string | number;
 }
 
 /** The model id Ollama itself uses: `/api/tags` repeats it in `name` and `model`. */
@@ -55,7 +53,8 @@ function capabilitiesOf(summary: OllamaModelSummary, show: OllamaShowResponse): 
  * Pi thinking levels mapped onto the level names the model itself accepts. Named values
  * are matched case-insensitively; a level the model does not offer is `null` so Pi never
  * sends an unsupported named level. A model that only reports booleans offers one on
- * level, exposed as `medium`.
+ * level, exposed as `medium` and mapped to the string `"true"` so the request sends the
+ * boolean the model accepts.
  */
 function thinkingLevelMapOf(thinking: OllamaShowResponse["thinking"]): ThinkingLevelMap | undefined {
 	const values = thinking?.values;
@@ -67,7 +66,7 @@ function thinkingLevelMapOf(thinking: OllamaShowResponse["thinking"]): ThinkingL
 			off: "off",
 			minimal: null,
 			low: null,
-			medium: "medium",
+			medium: "true",
 			high: null,
 			xhigh: null,
 			max: null,
@@ -87,15 +86,14 @@ function thinkingLevelMapOf(thinking: OllamaShowResponse["thinking"]): ThinkingL
 }
 
 /**
- * Builds one Pi model and the per-model request metadata from the tags summary and the
- * `/api/show` payload. `show` may be empty: a model whose metadata request failed keeps
- * conservative defaults instead of disappearing from the catalog.
+ * Builds one Pi model from the tags summary and the `/api/show` payload. Everything a
+ * request needs (context window, thinking levels) lives on the model, so a catalog
+ * restored from disk keeps it without a network round trip. `show` may be empty: a model
+ * whose metadata request failed keeps conservative defaults instead of disappearing from
+ * the catalog.
  */
-export function toChatModel(input: ToChatModelInput): {
-	model: Model<"ollama-chat">;
-	metadata: OllamaStreamMetadata;
-} {
-	const { summary, show, providerId, baseUrl, kind, keepAlive } = input;
+export function toChatModel(input: ToChatModelInput): Model<"ollama-chat"> {
+	const { summary, show, providerId, baseUrl } = input;
 	const id = modelName(summary);
 	const contextWindow = contextWindowOf(show);
 	const capabilities = capabilitiesOf(summary, show);
@@ -104,7 +102,7 @@ export function toChatModel(input: ToChatModelInput): {
 	const modalities: ModelInputModality[] = ["text"];
 	if (capabilities.has("vision")) modalities.push("image");
 
-	const model: Model<"ollama-chat"> = {
+	return {
 		id,
 		name: id,
 		api: OLLAMA_CHAT_API,
@@ -117,26 +115,14 @@ export function toChatModel(input: ToChatModelInput): {
 		maxTokens: contextWindow,
 		...(thinkingLevelMap !== undefined && { thinkingLevelMap }),
 	};
-
-	const thinking = show.thinking?.values?.length ? show.thinking : undefined;
-	const metadata: OllamaStreamMetadata = {
-		...(thinking && { thinking }),
-		// Cloud serves its own fixed context, so only the local server is asked for one.
-		...(kind === "local" && { numCtx: contextWindow }),
-		...(keepAlive !== undefined && { keepAlive }),
-	};
-
-	return { model, metadata };
 }
 
 export interface LoadCatalogOptions {
 	client: OllamaClient;
 	providerId: string;
-	kind: "local" | "cloud";
 	/** `false` keeps the cached catalog and never opens a connection. */
 	allowNetwork: boolean;
 	stored?: readonly Model<"ollama-chat">[];
-	keepAlive?: string | number;
 	signal?: AbortSignal;
 }
 
@@ -181,12 +167,10 @@ async function showAll(
  * Loads the catalog for one provider. Offline and on a failed `/api/tags` the stored
  * catalog is returned unchanged, so a provider always has models to offer.
  */
-export async function loadCatalog(
-	options: LoadCatalogOptions,
-): Promise<{ models: Model<"ollama-chat">[]; metadata: Map<string, OllamaStreamMetadata> }> {
+export async function loadCatalog(options: LoadCatalogOptions): Promise<Model<"ollama-chat">[]> {
 	const stored: Model<"ollama-chat">[] = [...(options.stored ?? [])];
 	if (!options.allowNetwork) {
-		return { models: stored, metadata: new Map() };
+		return stored;
 	}
 
 	let summaries: OllamaModelSummary[];
@@ -194,25 +178,18 @@ export async function loadCatalog(
 		summaries = await options.client.listModels(options.signal);
 	} catch (error) {
 		if (options.signal?.aborted) throw error;
-		return { models: stored, metadata: new Map() };
+		return stored;
 	}
 
 	const chatModels = summaries.filter(isChatModel);
 	const shows = await showAll(options.client, chatModels, options.signal);
 
-	const models: Model<"ollama-chat">[] = [];
-	const metadata = new Map<string, OllamaStreamMetadata>();
-	for (const [index, summary] of chatModels.entries()) {
-		const entry = toChatModel({
+	return chatModels.map((summary, index) =>
+		toChatModel({
 			summary,
 			show: shows[index] ?? {},
 			providerId: options.providerId,
 			baseUrl: options.client.baseUrl,
-			kind: options.kind,
-			...(options.keepAlive !== undefined && { keepAlive: options.keepAlive }),
-		});
-		models.push(entry.model);
-		metadata.set(entry.model.id, entry.metadata);
-	}
-	return { models, metadata };
+		}),
+	);
 }

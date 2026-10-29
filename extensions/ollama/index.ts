@@ -1,4 +1,12 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { createOllamaProvider } from "../../src/provider.ts";
 
-/** Registers the `ollama` and `ollama-cloud` providers. Wired in task T6. */
-export default function ollamaExtension(_pi: ExtensionAPI): void {}
+/**
+ * Registers the two independent providers: `ollama` for a local server and
+ * `ollama-cloud` for Ollama Cloud. Both are dynamic, so Pi discovers their models from
+ * the server and persists the catalog between runs.
+ */
+export default function ollamaExtension(pi: ExtensionAPI): void {
+	pi.registerProvider(createOllamaProvider("local"));
+	pi.registerProvider(createOllamaProvider("cloud"));
+}

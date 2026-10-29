@@ -21,18 +21,17 @@ import { buildOllamaMessages, ollamaToolCallToPi, toOllamaTools } from "./conver
 /** The custom API id this adapter implements, used by the registered providers. */
 export const OLLAMA_CHAT_API = "ollama-chat";
 
+/** Which Ollama server a request targets; only the local server allocates a context window. */
+export type OllamaChatConfig = { kind: "local" | "cloud" };
+
 /**
- * Per-model facts from `POST /api/show` that shape the request. They are passed next to
- * the Pi options because `Model<"ollama-chat">` carries no Ollama-specific fields.
+ * `SimpleStreamOptions` with the thinking level widened to `ModelThinkingLevel`: unlike the
+ * built-in adapters, this one does not clamp the level, so it also honors an explicit
+ * `off` and omits `think` for a level the model does not offer.
  */
-export interface OllamaStreamMetadata {
-	/** `num_ctx`: the context window the server should allocate for this model. */
-	numCtx?: number;
-	/** `keep_alive`: how long the server keeps the model loaded. */
-	keepAlive?: string | number;
-	/** Reasoning support, from `thinking.values` and `thinking.default` on `/api/show`. */
-	thinking?: { values?: (boolean | string)[]; default?: boolean | string };
-}
+export type OllamaStreamOptions = Omit<SimpleStreamOptions, "reasoning"> & {
+	reasoning?: ModelThinkingLevel;
+};
 
 function createAssistantMessage(model: Model<"ollama-chat">): AssistantMessage {
 	return {
@@ -55,40 +54,39 @@ function createAssistantMessage(model: Model<"ollama-chat">): AssistantMessage {
 }
 
 /**
- * Maps a Pi thinking level to Ollama's `think` field. Ollama accepts a boolean or one of
- * the model's own level names, so the level is matched case-insensitively against
- * `thinking.values`; a boolean-only model falls back to `true`. A model without thinking
- * support receives no `think` field at all, and an unset level leaves the server default
- * in place.
+ * Maps a Pi thinking level to Ollama's `think` field through the model's own
+ * `thinkingLevelMap`, so the value survives a restart from the persisted catalog:
+ * `off` becomes boolean `false` when the model supports it, an enabled level becomes the
+ * mapped name verbatim, and the string `"true"` (a boolean-only model) becomes boolean
+ * `true`. A `null`, missing or absent map entry omits the field.
  */
 function resolveThink(
+	model: Model<"ollama-chat">,
 	reasoning: ModelThinkingLevel | undefined,
-	thinking: OllamaStreamMetadata["thinking"],
 ): boolean | string | undefined {
-	if (!thinking || reasoning === undefined) return undefined;
-	if (reasoning === "off") return false;
-	const values = thinking.values ?? [];
-	const wanted = reasoning.toLowerCase();
-	for (const value of values) {
-		if (typeof value === "string" && value.toLowerCase() === wanted) return value;
-	}
-	return values.includes(true) ? true : undefined;
+	const map = model.thinkingLevelMap;
+	if (!map || reasoning === undefined) return undefined;
+	if (reasoning === "off") return map.off != null ? false : undefined;
+	const mapped = map[reasoning];
+	if (mapped == null) return undefined;
+	return mapped === "true" ? true : mapped;
 }
 
 function buildChatRequest(
 	model: Model<"ollama-chat">,
 	context: TranscriptContext,
-	options: SimpleStreamOptions | undefined,
-	metadata: OllamaStreamMetadata | undefined,
+	options: OllamaStreamOptions | undefined,
+	config: OllamaChatConfig | undefined,
 ): OllamaChatRequest {
 	const chatOptions: Record<string, unknown> = {};
-	if (metadata?.numCtx !== undefined) chatOptions.num_ctx = metadata.numCtx;
+	// Cloud serves its own fixed context, so only the local server is asked for one.
+	if (config?.kind === "local") chatOptions.num_ctx = model.contextWindow;
 	if (options?.maxTokens !== undefined) chatOptions.num_predict = options.maxTokens;
 	if (options?.temperature !== undefined) chatOptions.temperature = options.temperature;
 	// `samplingParams` is merged last, so a caller can override any named option above.
 	Object.assign(chatOptions, options?.samplingParams ?? {});
 
-	const think = resolveThink(options?.reasoning, metadata?.thinking);
+	const think = resolveThink(model, options?.reasoning);
 	const tools = toOllamaTools(getCurrentTools(context.messages));
 
 	return {
@@ -101,7 +99,6 @@ function buildChatRequest(
 			messages: context.messages.filter((message) => message.role !== "system"),
 		}),
 		...(think !== undefined && { think }),
-		...(metadata?.keepAlive !== undefined && { keep_alive: metadata.keepAlive }),
 		...(Object.keys(chatOptions).length > 0 && { options: chatOptions }),
 		...(tools !== undefined && { tools }),
 	};
@@ -141,14 +138,15 @@ function errorText(error: unknown, aborted: boolean): string {
  *
  * Text and thinking are streamed as they arrive; Ollama delivers tool calls already
  * complete (arguments are an object), so each call emits `toolcall_start` immediately
- * followed by `toolcall_end` and no deltas. Failures never throw: they terminate the
- * stream with one `error` event.
+ * followed by `toolcall_end` and no deltas. Every request-shaping fact (context window,
+ * thinking levels) is read from the model itself. Failures never throw: they terminate
+ * the stream with one `error` event.
  */
 export function streamOllamaChat(
 	model: Model<"ollama-chat">,
 	context: TranscriptContext,
-	options?: SimpleStreamOptions,
-	metadata?: OllamaStreamMetadata,
+	options?: OllamaStreamOptions,
+	config?: OllamaChatConfig,
 ): AssistantMessageEventStream {
 	const stream = createAssistantMessageEventStream();
 	const output = createAssistantMessage(model);
@@ -182,7 +180,7 @@ export function streamOllamaChat(
 
 	void (async () => {
 		try {
-			const payload = buildChatRequest(model, context, options, metadata);
+			const payload = buildChatRequest(model, context, options, config);
 			const replacement = await options?.onPayload?.(payload, model);
 			const request = (replacement ?? payload) as OllamaChatRequest;
 			const client = new OllamaClient({
