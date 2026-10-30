@@ -17,6 +17,7 @@ import {
 } from "@earendil-works/pi-ai";
 import { OllamaClient, OllamaError, type OllamaChatChunk, type OllamaChatRequest } from "./client.ts";
 import { buildOllamaMessages, ollamaToolCallToPi, toOllamaTools } from "./convert.ts";
+import { transformMessages } from "../vendor/pi-ai/api/transform-messages.js";
 
 /** The custom API id this adapter implements, used by the registered providers. */
 export const OLLAMA_CHAT_API = "ollama-chat";
@@ -89,14 +90,21 @@ function buildChatRequest(
 	const think = resolveThink(model, options?.reasoning);
 	const tools = toOllamaTools(getCurrentTools(context.messages));
 
+	// Every Pi adapter runs the transcript through `transformMessages` before converting: errored
+	// and aborted turns are dropped, orphaned tool calls get a synthetic result, and images a
+	// model cannot read are downgraded to placeholders. Without it, an Esc after a tool call
+	// replays an assistant `tool_calls` with no `tool` behind it — an invalid sequence — and a
+	// text-only model receives `images` it rejects.
+	const messages = transformMessages([...context.messages], model);
+
 	return {
 		model: model.id,
 		messages: buildOllamaMessages({
-			systemPrompt: getCurrentSystemPrompt(context.messages),
+			systemPrompt: getCurrentSystemPrompt(messages),
 			// The prompt above already replays every system message, so the conversion only
 			// receives the conversation: handing it the system messages again would send the
 			// prompt twice.
-			messages: context.messages.filter((message) => message.role !== "system"),
+			messages: messages.filter((message) => message.role !== "system"),
 		}),
 		...(think !== undefined && { think }),
 		...(Object.keys(chatOptions).length > 0 && { options: chatOptions }),
@@ -105,17 +113,19 @@ function buildChatRequest(
 }
 
 function usageOf(chunk: OllamaChatChunk | undefined, model: Model<"ollama-chat">): Usage {
-	const input = chunk?.prompt_eval_count ?? 0;
-	const output = chunk?.eval_count ?? 0;
+	// Pi's contract: `input` counts only the uncached prompt tokens and is disjoint from
+	// `cacheRead`. `prompt_eval_count` includes the cached prefix, so subtracting here keeps
+	// `overflow` (`input + cacheRead`) and `calculateCost` from counting that prefix twice.
+	const promptTotal = chunk?.prompt_eval_count ?? 0;
 	const cacheRead = chunk?.prompt_eval_cached_count ?? 0;
+	const input = Math.max(0, promptTotal - cacheRead);
+	const output = chunk?.eval_count ?? 0;
 	const usage: Usage = {
 		input,
 		output,
 		cacheRead,
 		cacheWrite: 0,
-		// `prompt_eval_count` already counts the cached prompt tokens, so `cacheRead` is a
-		// subset of `input` and must not be added to the total a second time.
-		totalTokens: input + output,
+		totalTokens: promptTotal + output,
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 	};
 	usage.cost = calculateCost(model, usage);

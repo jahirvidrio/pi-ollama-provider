@@ -1,9 +1,12 @@
 import { describe, expect, it } from "vitest";
 import {
+	type AssistantMessage,
 	type AssistantMessageEvent,
+	type Message,
 	type Model,
 	type ThinkingLevelMap,
 	type Tool,
+	type Usage,
 	isContextOverflow,
 	normalizeContext,
 } from "@earendil-works/pi-ai";
@@ -125,8 +128,10 @@ describe("streamOllamaChat", () => {
 			expect(events.at(-1)).toMatchObject({ type: "done", reason: "stop" });
 			const message = lastMessage(events);
 			expect(message.content).toEqual([{ type: "text", text: "Hello" }]);
+			// Pi's usage contract: 11 prompt tokens include the 8 cached ones, so `input` is the
+			// uncached remainder and the total still counts each token once.
 			expect(message.usage).toMatchObject({
-				input: 11,
+				input: 3,
 				output: 2,
 				cacheRead: 8,
 				cacheWrite: 0,
@@ -384,5 +389,95 @@ describe("streamOllamaChat", () => {
 		} finally {
 			await server.stop();
 		}
+	});
+});
+
+describe("streamOllamaChat transcript transform", () => {
+	const zeroUsage: Usage = {
+		input: 0,
+		output: 0,
+		cacheRead: 0,
+		cacheWrite: 0,
+		totalTokens: 0,
+		cost: { ...ZERO_COST, total: 0 },
+	};
+
+	function assistant(overrides: Partial<AssistantMessage> = {}): AssistantMessage {
+		return {
+			role: "assistant",
+			content: [],
+			api: "ollama-chat",
+			provider: "ollama",
+			model: "gemma4:31b",
+			usage: zeroUsage,
+			stopReason: "stop",
+			timestamp: 0,
+			...overrides,
+		};
+	}
+
+	/** Streams one request over the given transcript and returns the JSON body the server saw. */
+	async function chatBody(
+		messages: Message[],
+		modelOverrides: Partial<Model<"ollama-chat">> = {},
+	): Promise<{ messages: Record<string, unknown>[] }> {
+		const server = await startFakeOllama({
+			chat: { chunks: [{ message: { role: "assistant", content: "ok" }, done: true, done_reason: "stop" }] },
+		});
+		try {
+			await collect(
+				streamOllamaChat(
+					model({ baseUrl: server.baseUrl, ...modelOverrides }),
+					normalizeContext({ systemPrompt: "You are Pi.", messages }),
+				),
+			);
+			return (server.requests[0]?.body ?? { messages: [] }) as { messages: Record<string, unknown>[] };
+		} finally {
+			await server.stop();
+		}
+	}
+
+	it("drops an aborted turn instead of replaying a tool call with no result", async () => {
+		const body = await chatBody([
+			{ role: "user", content: "hi", timestamp: 0 },
+			assistant({
+				stopReason: "aborted",
+				content: [{ type: "toolCall", id: "ollama_call_0", name: "read", arguments: { path: "a" } }],
+			}),
+		]);
+
+		expect(body.messages.map((message) => message.role)).toEqual(["system", "user"]);
+	});
+
+	it("synthesizes a result for an orphaned tool call", async () => {
+		const body = await chatBody([
+			{ role: "user", content: "hi", timestamp: 0 },
+			assistant({ content: [{ type: "toolCall", id: "ollama_call_0", name: "read", arguments: {} }] }),
+		]);
+
+		expect(body.messages.map((message) => message.role)).toEqual(["system", "user", "assistant", "tool"]);
+		expect(body.messages.at(-1)).toMatchObject({ role: "tool", content: "No result provided" });
+	});
+
+	it("downgrades an image for a model that cannot read it", async () => {
+		const body = await chatBody(
+			[
+				{
+					role: "user",
+					content: [
+						{ type: "text", text: "what is this?" },
+						{ type: "image", data: "aGk=", mimeType: "image/png" },
+					],
+					timestamp: 0,
+				},
+			],
+			{ input: ["text"] },
+		);
+
+		expect(body.messages.at(-1)).toMatchObject({
+			role: "user",
+			content: "what is this?(image omitted: model does not support images)",
+		});
+		expect(body.messages.at(-1)).not.toHaveProperty("images");
 	});
 });
