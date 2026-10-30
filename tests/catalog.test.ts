@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import type { Model } from '@earendil-works/pi-ai';
 import { OllamaClient } from '../src/client/index.ts';
-import { loadCatalog, toChatModel } from '../src/catalog/index.ts';
+import { loadCatalog } from '../src/catalog/index.ts';
+import { toChatModel } from '../src/catalog/model.ts';
 import { startFakeOllama } from './helpers/fake-ollama.ts';
 
 const TAGS = {
