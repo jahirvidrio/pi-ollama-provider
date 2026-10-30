@@ -6,8 +6,12 @@ export interface FakeOllamaReply {
 	status?: number;
 	body?: unknown;
 	chunks?: unknown[];
-	/** Lines written verbatim, for malformed-payload tests. */
-	rawChunks?: string[];
+	/**
+	 * Lines written verbatim, for malformed-payload tests. `Uint8Array` chunks are
+	 * written as-is so tests control the exact byte boundaries of the stream;
+	 * string lines keep the trailing-newline behavior of `chunks`.
+	 */
+	rawChunks?: (string | Uint8Array)[];
 	/** Body written byte-for-byte with no added newline, for EOF-boundary tests. */
 	rawBody?: string;
 	/** Keep the connection open after the last chunk so callers can test aborts. */
@@ -77,7 +81,7 @@ function writeJson(response: ServerResponse, status: number, payload: unknown): 
 
 async function writeStream(
 	response: ServerResponse,
-	chunks: string[],
+	chunks: (string | Uint8Array)[],
 	reply: FakeOllamaReply,
 	signal: AbortSignal,
 ): Promise<void> {
@@ -85,7 +89,13 @@ async function writeStream(
 	const delay = reply.chunkDelayMs ?? 0;
 	for (const chunk of chunks) {
 		if (signal.aborted) return;
-		response.write(`${chunk}\n`);
+		// Byte chunks are written without an added newline so a test can split one
+		// line across many chunks; string lines keep the historical behavior.
+		if (typeof chunk === "string") {
+			response.write(`${chunk}\n`);
+		} else {
+			response.write(chunk);
+		}
 		if (delay > 0) {
 			await new Promise((resolve) => setTimeout(resolve, delay));
 		}

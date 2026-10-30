@@ -318,7 +318,13 @@ export class OllamaClient {
 
 			const reader = response.body.getReader();
 			const decoder = new TextDecoder();
-			let buffer = "";
+			// Incremental line scan: `tail` carries the unterminated start of the next line
+			// across chunks and never contains a "\n", so each decoded chunk is searched
+			// only within itself — the already-buffered prefix is never rescanned.
+			// Appending to `tail` builds a V8 cons string that is flattened once per
+			// completed line, so total work stays linear in received bytes even when a
+			// multi-MiB line arrives fragmented across many chunks.
+			let tail = "";
 			try {
 				while (true) {
 					// Hold the window only while the client waits on the server: clearing it as soon
@@ -327,18 +333,21 @@ export class OllamaClient {
 					const { done, value } = await reader.read();
 					clearIdleTimer();
 					if (done) break;
-					buffer += decoder.decode(value, { stream: true });
-					let newline = buffer.indexOf("\n");
+					const text = decoder.decode(value, { stream: true });
+					let cursor = 0;
+					let newline = text.indexOf("\n");
 					while (newline >= 0) {
-						const line = buffer.slice(0, newline).trim();
-						buffer = buffer.slice(newline + 1);
+						const line = (tail + text.slice(cursor, newline)).trim();
+						tail = "";
 						if (line.length > 0) yield this.parseChunk(line);
-						newline = buffer.indexOf("\n");
+						cursor = newline + 1;
+						newline = text.indexOf("\n", cursor);
 					}
+					tail += text.slice(cursor);
 				}
-				buffer += decoder.decode();
-				const tail = buffer.trim();
-				if (tail.length > 0) yield this.parseChunk(tail);
+				tail += decoder.decode();
+				const last = tail.trim();
+				if (last.length > 0) yield this.parseChunk(last);
 			} catch (error) {
 				if (isAbort(error, signal) || controller.signal.aborted) throw abortReason(error, signal, controller.signal);
 				if (error instanceof OllamaError) throw error;

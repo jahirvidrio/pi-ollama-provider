@@ -67,6 +67,26 @@ describe("fake ollama server", () => {
 		}
 	});
 
+	it("writes rawChunks byte chunks verbatim and string lines with a newline", async () => {
+		const server = await startFakeOllama();
+		try {
+			server.respond({
+				rawChunks: [
+				'{"message":{"content":"ok"},"done":false}',
+				new TextEncoder().encode('{"message":{"content":"bye"},"done":false}\n'),
+				],
+			});
+			const response = await fetch(`${server.baseUrl}/chat`, { method: "POST", body: "{}" });
+
+			expect(await response.text()).toBe(
+				'{"message":{"content":"ok"},"done":false}\n' +
+					'{"message":{"content":"bye"},"done":false}\n',
+			);
+		} finally {
+			await server.stop();
+		}
+	});
+
 	it("returns an HTTP error body without streaming", async () => {
 		const server = await startFakeOllama();
 		try {
