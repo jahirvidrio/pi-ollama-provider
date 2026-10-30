@@ -1,111 +1,15 @@
-/** Wire types and HTTP client for the native Ollama API (`/api/*`). */
+/** HTTP client for the native Ollama API (`/api/*`): endpoints, deadlines, retries and the chat stream. */
 
 import { retryProviderRequest } from "../vendor/pi-ai/utils/provider-retry.js";
-
-export type OllamaErrorKind = "http" | "stream" | "network" | "protocol";
-
-export class OllamaError extends Error {
-	readonly kind: OllamaErrorKind;
-	/**
-	 * HTTP status and response headers, when a response arrived at all. Both are always own
-	 * properties, even when undefined: Pi's `isProviderError` probe requires the keys to be
-	 * present before it reads `status`, and its retry policy takes `retry-after` and
-	 * `x-should-retry` from these headers.
-	 */
-	readonly status: number | undefined;
-	readonly headers: Headers | undefined;
-
-	constructor(kind: OllamaErrorKind, message: string, status?: number, headers?: Headers) {
-		super(message);
-		this.name = "OllamaError";
-		this.kind = kind;
-		this.status = status;
-		this.headers = headers;
-	}
-}
-
-export interface OllamaModelSummary {
-	name: string;
-	model: string;
-	modified_at?: string;
-	size?: number;
-	digest?: string;
-	remote_model?: string;
-	remote_host?: string;
-	details?: {
-		format?: string;
-		family?: string;
-		families?: string[] | null;
-		parameter_size?: string;
-		quantization_level?: string;
-	};
-	capabilities?: string[];
-}
-
-export interface OllamaShowResponse {
-	capabilities?: string[];
-	model_info?: Record<string, unknown>;
-	thinking?: { values?: (boolean | string)[]; default?: boolean | string };
-	parameters?: string;
-	details?: OllamaModelSummary["details"];
-}
-
-export interface OllamaToolCall {
-	function: { name: string; arguments?: Record<string, unknown> };
-}
-
-export interface OllamaChatMessage {
-	role: "system" | "user" | "assistant" | "tool";
-	content: string;
-	images?: string[];
-	thinking?: string;
-	tool_calls?: OllamaToolCall[];
-}
-
-export interface OllamaToolDefinition {
-	type: "function";
-	function: { name: string; description?: string; parameters: Record<string, unknown> };
-}
-
-export interface OllamaChatRequest {
-	model: string;
-	messages: OllamaChatMessage[];
-	tools?: OllamaToolDefinition[];
-	think?: boolean | string;
-	keep_alive?: string | number;
-	options?: Record<string, unknown>;
-}
-
-export interface OllamaChatChunk {
-	model?: string;
-	created_at?: string;
-	message?: {
-		role?: string;
-		content?: string;
-		thinking?: string;
-		tool_calls?: OllamaToolCall[];
-		images?: string[];
-	};
-	done?: boolean;
-	done_reason?: string;
-	total_duration?: number;
-	load_duration?: number;
-	prompt_eval_count?: number;
-	prompt_eval_cached_count?: number;
-	prompt_eval_duration?: number;
-	eval_count?: number;
-	eval_duration?: number;
-	error?: string;
-}
-
-/**
- * Accepts an origin, an origin with a path, or an `/api` base URL and returns the
- * canonical `/api` endpoint. Pi stores whatever the user typed during `/login`.
- */
-export function normalizeOllamaBaseUrl(input: string): string {
-	const trimmed = input.trim().replace(/\/+$/, "");
-	return trimmed.endsWith("/api") ? trimmed : `${trimmed}/api`;
-}
+import { capErrorBody, OllamaError, providerMessage } from "./errors.ts";
+import { readLines } from "./ndjson.ts";
+import {
+	type OllamaChatChunk,
+	type OllamaChatRequest,
+	type OllamaModelSummary,
+	type OllamaShowResponse,
+	normalizeOllamaBaseUrl,
+} from "./wire.ts";
 
 function isAbort(error: unknown, signal: AbortSignal | undefined): boolean {
 	if (signal?.aborted) return true;
@@ -129,39 +33,6 @@ function abortReason(
 	if (signal?.aborted) return signal.reason ?? error;
 	const reason = controllerSignal.reason;
 	return reason instanceof OllamaError ? reason : error;
-}
-
-/**
- * Same cap Pi's `error-body` helper applies, so a hostile or buggy server cannot inflate the
- * transcript. Reused for an error chunk and for a malformed stream line: both end up in
- * `errorMessage`, which the transcript persists, the TUI renders and Pi matches its error
- * patterns against.
- */
-const MAX_ERROR_BODY_CHARS = 4000;
-
-/**
- * Largest JSON error body that is parsed whole. Cap-then-parse keeps the envelope intact up to
- * here, so a server that explains itself in a long JSON payload still contributes its message;
- * past it the capped raw body is shown instead of paying for a parse that cannot fit the
- * transcript either. Anything at or below the 4 KB display cap parses in both designs.
- */
-const MAX_PARSED_ERROR_BODY_CHARS = 64 * 1024;
-
-export function capErrorBody(text: string): string {
-	const trimmed = text.trim();
-	if (trimmed.length <= MAX_ERROR_BODY_CHARS) return trimmed;
-	return `${trimmed.slice(0, MAX_ERROR_BODY_CHARS)}… [truncated ${trimmed.length - MAX_ERROR_BODY_CHARS} chars]`;
-}
-
-function providerMessage(text: string): string {
-	if (text.length > MAX_PARSED_ERROR_BODY_CHARS) return capErrorBody(text);
-	try {
-		const parsed = JSON.parse(text) as { error?: unknown };
-		if (typeof parsed.error === "string") return capErrorBody(parsed.error);
-	} catch {
-		// Not JSON: the capped raw body is the best description available.
-	}
-	return capErrorBody(text);
 }
 
 /**
@@ -206,10 +77,9 @@ export interface OllamaClientOptions {
 	/**
 	 * Abort a request when the server goes this long without progress. A chat request has an idle
 	 * window: from the send until the response headers arrive, then while awaiting each body
-	 * chunk, and caller work never counts against it. The JSON endpoints (`/version`, `/tags`,
-	 * `/show`) have no progress to observe, so they get this as a deadline for the whole exchange,
-	 * body included; the catalog and the login probes pass their own budgets. Pi passes its own
-	 * request timeout here.
+	 * chunk, and caller work never counts against it. The JSON endpoints (`/tags`, `/show`) have no
+	 * progress to observe, so they get this as a deadline for the whole exchange, body included; the
+	 * catalog and the login probes pass their own budgets. Pi passes its own request timeout here.
 	 */
 	timeoutMs?: number;
 	/**
@@ -510,38 +380,10 @@ export class OllamaClient {
 				throw new OllamaError("protocol", "Ollama /api/chat returned no response body");
 			}
 
-			const reader = response.body.getReader();
-			const decoder = new TextDecoder();
-			// Incremental line scan: `tail` carries the unterminated start of the next line
-			// across chunks and never contains a "\n", so each decoded chunk is searched
-			// only within itself — the already-buffered prefix is never rescanned.
-			// Appending to `tail` builds a V8 cons string that is flattened once per
-			// completed line, so total work stays linear in received bytes even when a
-			// multi-MiB line arrives fragmented across many chunks.
-			let tail = "";
 			try {
-				while (true) {
-					// Hold the window only while the client waits on the server: clearing it as soon
-					// as a chunk lands keeps decoding, parsing, and consumer time out of the budget.
-					armIdleTimer();
-					const { done, value } = await reader.read();
-					clearIdleTimer();
-					if (done) break;
-					const text = decoder.decode(value, { stream: true });
-					let cursor = 0;
-					let newline = text.indexOf("\n");
-					while (newline >= 0) {
-						const line = (tail + text.slice(cursor, newline)).trim();
-						tail = "";
-						if (line.length > 0) yield this.parseChunk(line);
-						cursor = newline + 1;
-						newline = text.indexOf("\n", cursor);
-					}
-					tail += text.slice(cursor);
+				for await (const line of readLines(response.body, { arm: armIdleTimer, clear: clearIdleTimer })) {
+					yield this.parseChunk(line);
 				}
-				tail += decoder.decode();
-				const last = tail.trim();
-				if (last.length > 0) yield this.parseChunk(last);
 			} catch (error) {
 				if (isAbort(error, signal) || controller.signal.aborted) throw abortReason(error, signal, controller.signal);
 				if (error instanceof OllamaError) throw error;
@@ -551,10 +393,6 @@ export class OllamaClient {
 				);
 			} finally {
 				clearIdleTimer();
-				// Release the socket instead of only unlocking the reader, so an early break on the
-				// final chunk does not leave a connection open until the server closes it.
-				await reader.cancel().catch(() => undefined);
-				reader.releaseLock();
 			}
 		} finally {
 			// The window can be armed before the fetch and the caller abort listener is attached

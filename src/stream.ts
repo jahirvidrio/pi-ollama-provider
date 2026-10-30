@@ -17,13 +17,9 @@ import {
 	getCurrentTools,
 	parseToolCallArguments,
 } from "@earendil-works/pi-ai";
-import {
-	createClient,
-	OllamaError,
-	type OllamaChatChunk,
-	type OllamaChatRequest,
-	type OllamaToolCall,
-} from "./client.ts";
+import { createClient } from "./client.ts";
+import { OllamaError } from "./errors.ts";
+import type { OllamaChatChunk, OllamaChatRequest, OllamaToolCall } from "./wire.ts";
 import { buildOllamaMessages, ollamaToolCallToPi, toOllamaTools } from "./convert.ts";
 import { transformMessages } from "../vendor/pi-ai/api/transform-messages.js";
 

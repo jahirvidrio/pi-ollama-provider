@@ -16,8 +16,9 @@ import {
 	createProvider,
 } from "@earendil-works/pi-ai";
 import { loadCatalog } from "./catalog.ts";
-import { createClient, normalizeOllamaBaseUrl } from "./client.ts";
+import { createClient } from "./client.ts";
 import { OLLAMA_CHAT_API, type OllamaChatConfig, streamOllamaChat } from "./stream.ts";
+import { normalizeOllamaBaseUrl } from "./wire.ts";
 
 export const OLLAMA_PROVIDER_ID = "ollama";
 export const OLLAMA_CLOUD_PROVIDER_ID = "ollama-cloud";

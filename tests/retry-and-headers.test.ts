@@ -4,7 +4,8 @@ import {
 	type Model,
 	normalizeContext,
 } from "@earendil-works/pi-ai";
-import { OllamaClient, OllamaError } from "../src/client.ts";
+import { OllamaClient } from "../src/client.ts";
+import { OllamaError } from "../src/errors.ts";
 import { streamOllamaChat } from "../src/stream.ts";
 import { startFakeOllama } from "./helpers/fake-ollama.ts";
 

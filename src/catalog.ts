@@ -1,7 +1,8 @@
 /** Model catalog: `GET /api/tags` plus `POST /api/show` translated into Pi models. */
 
 import type { Model, ModelInputModality, ThinkingLevel, ThinkingLevelMap } from "@earendil-works/pi-ai";
-import type { OllamaClient, OllamaModelSummary, OllamaShowResponse } from "./client.ts";
+import type { OllamaClient } from "./client.ts";
+import type { OllamaModelSummary, OllamaShowResponse } from "./wire.ts";
 import { OLLAMA_CHAT_API } from "./stream.ts";
 
 /**

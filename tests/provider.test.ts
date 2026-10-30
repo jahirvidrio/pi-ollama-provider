@@ -9,7 +9,7 @@ import {
 	type ProviderAuthInteraction,
 	type RefreshModelsContext,
 } from "@earendil-works/pi-ai";
-import { OllamaError } from "../src/client.ts";
+import { OllamaError } from "../src/errors.ts";
 import { DEFAULT_OLLAMA_BASE_URL, DEFAULT_OLLAMA_CLOUD_BASE_URL, createOllamaProvider } from "../src/provider.ts";
 import { startFakeOllama } from "./helpers/fake-ollama.ts";
 

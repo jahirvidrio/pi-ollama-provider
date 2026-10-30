@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { OllamaClient, OllamaError, normalizeOllamaBaseUrl } from "../src/client.ts";
+import { OllamaClient } from "../src/client.ts";
+import { OllamaError } from "../src/errors.ts";
+import { normalizeOllamaBaseUrl } from "../src/wire.ts";
 import { startFakeOllama } from "./helpers/fake-ollama.ts";
 
 describe("normalizeOllamaBaseUrl", () => {
