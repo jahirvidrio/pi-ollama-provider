@@ -113,6 +113,39 @@ ADR 0003 in the project's decision log.
 - A stream that closes without a `done` chunk is reported as an error, never as a completed
   response.
 - Cloud requests do not send `num_ctx`: the hosted service manages its own context.
+- **A local context window is an allocation, not just a limit.** `model.contextWindow` travels as
+  `options.num_ctx`, so asking a model for a window larger than the memory it can get either stops
+  it from loading or spills it to CPU. Two escape hatches: `samplingParams.num_ctx` (merged last,
+  so it wins) or a smaller `contextWindow` in the catalog. This is one of the reasons the adapter
+  speaks `/api/chat` instead of the OpenAI-compatible `/v1` shim, which drops `num_ctx` and
+  replaces the per-chunk idle window with a global one.
+- **`timeoutMs` measures the server, not the caller.** The budget covers the wait from the request
+  until the response headers and then each wait between two chunks; decoding, consumer work and
+  `onResponse` never count against it. Pi passes its own budget here — `retry.provider.timeoutMs`
+  when set, otherwise the `httpIdleTimeoutMs` global setting (300 s by default) — so a body that
+  stalls between chunks is bounded by that value, not by the adapter.
+
+## Vendored helpers
+
+Two pure helpers from `@earendil-works/pi-ai` live in `vendor/pi-ai/`, byte-identical to the
+installed package and copied rather than imported:
+
+| Vendored file | What it provides |
+| --- | --- |
+| `api/transform-messages.js` | `transformMessages`: drops errored and aborted turns, closes orphaned tool calls, downgrades images the model cannot read |
+| `utils/provider-retry.js` | `retryProviderRequest`: the OpenAI/Anthropic retry policy (408/409/429/5xx, `retry-after`, `x-should-retry`) with an interruptible backoff |
+
+Both are MIT (see `vendor/pi-ai/LICENSE`) and both ship in the package, because `files` includes
+`vendor/`. Copying is a loader constraint, not a preference: Pi's extension loader maps only
+`@earendil-works/pi-ai` and its four documented subpaths (`/compat`, `/models`, `/oauth`,
+`/providers/all`), so an unmapped subpath would load a second copy of `pi-ai` into the extension in
+a source build and fail outright in the compiled binary, where modules are virtual and nothing
+exists on disk to import.
+
+`npm run vendor:check` hashes the six vendored files against the installed `pi-ai` and fails on
+drift; when it does, read the upstream change and copy the new bytes over instead of editing the
+copies. If upstream ever exports both functions from the package root, delete `vendor/` and import
+them.
 
 ## Development
 
@@ -120,6 +153,7 @@ ADR 0003 in the project's decision log.
 npm install
 npm test          # vitest, offline, against a fake Ollama server
 npm run typecheck
+npm run vendor:check   # the vendored Pi helpers still match the installed pi-ai
 ```
 
 The tests replay recorded NDJSON through `tests/helpers/fake-ollama.ts`; no server or key is
