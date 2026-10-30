@@ -95,7 +95,7 @@ npm test          # vitest, offline, against a fake Ollama server
 npm run typecheck
 ```
 
-The tests replay recorded NDJSON through `test/helpers/fake-ollama.ts`; no server or key is
+The tests replay recorded NDJSON through `tests/helpers/fake-ollama.ts`; no server or key is
 needed for them.
 
 ## License
