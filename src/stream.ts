@@ -15,7 +15,7 @@ import {
 	getCurrentSystemPrompt,
 	getCurrentTools,
 } from "@earendil-works/pi-ai";
-import { OllamaClient, OllamaError, type OllamaChatChunk, type OllamaChatRequest } from "./client.ts";
+import { createClient, OllamaError, type OllamaChatChunk, type OllamaChatRequest } from "./client.ts";
 import { buildOllamaMessages, ollamaToolCallToPi, toOllamaTools } from "./convert.ts";
 import { transformMessages } from "../vendor/pi-ai/api/transform-messages.js";
 
@@ -193,18 +193,30 @@ export function streamOllamaChat(
 			const payload = buildChatRequest(model, context, options, config);
 			const replacement = await options?.onPayload?.(payload, model);
 			const request = (replacement ?? payload) as OllamaChatRequest;
-			const client = new OllamaClient({
-				baseUrl: model.baseUrl,
-				apiKey: options?.apiKey,
-				fetch: options?.fetch,
-				// Pi passes its provider request timeout here; the client applies it from the
-				// request send through the headers and then as the idle gap between chunks, so a
-				// hung or stalled server cannot hold the stream forever.
-				timeoutMs: options?.timeoutMs,
-				onResponse: options?.onResponse
-					? (response) => options.onResponse?.(response, model)
-					: undefined,
-			});
+			const client = createClient(
+				model.baseUrl,
+				{ apiKey: options?.apiKey },
+				{
+					fetch: options?.fetch,
+					// Pi passes its provider request timeout here; the client applies it from the
+					// request send through the headers and then as the idle gap between chunks, so a
+					// hung or stalled server cannot hold the stream forever.
+					timeoutMs: options?.timeoutMs,
+					// The headers Pi computed for this request: session, auth, caller and
+					// `transformHeaders` values. Ollama ignores most of them, but a corporate proxy and a
+					// caller's `transformHeaders` do not, and `null` suppresses an adapter default.
+					headers: options?.headers,
+					maxRetries: options?.maxRetries,
+					maxRetryDelayMs: options?.maxRetryDelayMs,
+					onResponse: options?.onResponse
+						? (response) => options.onResponse?.(response, model)
+						: undefined,
+				},
+			);
+			// `options.identity` (Pi's `User-Agent` and attribution headers) is deliberately not
+			// forwarded: building those headers needs Pi's `utils/identity.js` and `utils/version.js`,
+			// neither exported from the package root, so honoring it would open a second vendoring
+			// surface for a header Ollama ignores.
 
 			stream.push({ type: "start", partial: output });
 

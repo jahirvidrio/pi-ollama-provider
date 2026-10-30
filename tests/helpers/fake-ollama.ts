@@ -22,6 +22,8 @@ export interface FakeOllamaReply {
 	hangBody?: boolean;
 	/** Delay between streamed chunks, to observe incremental parsing. */
 	chunkDelayMs?: number;
+	/** Extra response headers, e.g. `retry-after` for a retry test. */
+	headers?: Record<string, string>;
 }
 
 export interface RecordedRequest {
@@ -70,11 +72,17 @@ async function readBody(request: IncomingMessage): Promise<unknown> {
 	}
 }
 
-function writeJson(response: ServerResponse, status: number, payload: unknown): void {
+function writeJson(
+	response: ServerResponse,
+	status: number,
+	payload: unknown,
+	headers?: Record<string, string>,
+): void {
 	const text = JSON.stringify(payload);
 	response.writeHead(status, {
 		"content-type": "application/json",
 		"content-length": Buffer.byteLength(text),
+		...headers,
 	});
 	response.end(text);
 }
@@ -85,7 +93,7 @@ async function writeStream(
 	reply: FakeOllamaReply,
 	signal: AbortSignal,
 ): Promise<void> {
-	response.writeHead(reply.status ?? 200, { "content-type": "application/x-ndjson" });
+	response.writeHead(reply.status ?? 200, { "content-type": "application/x-ndjson", ...reply.headers });
 	const delay = reply.chunkDelayMs ?? 0;
 	for (const chunk of chunks) {
 		if (signal.aborted) return;
@@ -140,12 +148,12 @@ export async function startFakeOllama(options: FakeOllamaOptions = {}): Promise<
 				const reply = replies.shift() ?? { chunks: [DEFAULT_DONE_CHUNK] };
 				if (reply.hangHeaders) return;
 				if (reply.hangBody) {
-					response.writeHead(reply.status ?? 200, { "content-type": "application/x-ndjson" });
+					response.writeHead(reply.status ?? 200, { "content-type": "application/x-ndjson", ...reply.headers });
 					response.flushHeaders();
 					return;
 				}
 				if (reply.rawBody !== undefined) {
-					response.writeHead(reply.status ?? 200, { "content-type": "application/x-ndjson" });
+					response.writeHead(reply.status ?? 200, { "content-type": "application/x-ndjson", ...reply.headers });
 					response.write(reply.rawBody);
 					if (!reply.keepOpen) response.end();
 					return;
@@ -155,7 +163,7 @@ export async function startFakeOllama(options: FakeOllamaOptions = {}): Promise<
 					await writeStream(response, lines, reply, controller.signal);
 					return;
 				}
-				writeJson(response, reply.status ?? 200, reply.body ?? {});
+				writeJson(response, reply.status ?? 200, reply.body ?? {}, reply.headers);
 				return;
 			}
 			writeJson(response, 404, { error: "not found" });

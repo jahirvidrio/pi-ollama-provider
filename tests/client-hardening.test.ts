@@ -220,7 +220,9 @@ describe("error bodies", () => {
 	it("caps a huge error body instead of keeping all of it", async () => {
 		const server = await startFakeOllama({ chat: { status: 500, body: { error: "x".repeat(2_000_000) } } });
 		try {
-			const error = await new OllamaClient({ baseUrl: server.baseUrl })
+			// `maxRetries: 0` keeps the one reply the test queued: a 5xx is retryable by default, and a
+			// second attempt would consume the fake server's default success reply instead.
+			const error = await new OllamaClient({ baseUrl: server.baseUrl, maxRetries: 0 })
 				.chat(REQUEST)
 				.next()
 				.catch((cause: unknown) => cause);

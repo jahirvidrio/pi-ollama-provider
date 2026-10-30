@@ -17,7 +17,7 @@ import {
 	type RefreshModelsContext,
 } from "@earendil-works/pi-ai";
 import { loadCatalog } from "./catalog.ts";
-import { OllamaClient, normalizeOllamaBaseUrl } from "./client.ts";
+import { createClient, normalizeOllamaBaseUrl } from "./client.ts";
 import { OLLAMA_CHAT_API, streamOllamaChat } from "./stream.ts";
 
 export const OLLAMA_PROVIDER_ID = "ollama";
@@ -91,10 +91,9 @@ function apiKeyAuth(identity: ProviderIdentity): ApiKeyAuth {
 			if (!local) {
 				const key = (await interaction.prompt({ type: "secret", message: "Ollama Cloud API key" })).trim();
 				// Verifying against `/api/tags` proves the key before it is persisted.
-				await new OllamaClient({
-					baseUrl: identity.defaultBaseUrl,
-					apiKey: key || undefined,
-				}).listModels(interaction.signal);
+				await createClient(identity.defaultBaseUrl, { apiKey: key || undefined }).listModels(
+					interaction.signal,
+				);
 				return { type: "api_key", key: key || undefined, env: { [OLLAMA_HOST_ENV]: identity.defaultBaseUrl } };
 			}
 			const fallback = process.env[OLLAMA_HOST_ENV] ?? identity.defaultBaseUrl;
@@ -104,7 +103,7 @@ function apiKeyAuth(identity: ProviderIdentity): ApiKeyAuth {
 				placeholder: fallback,
 			});
 			const baseUrl = normalizeOllamaBaseUrl(entered.trim() || fallback);
-			await new OllamaClient({ baseUrl }).version(interaction.signal);
+			await createClient(baseUrl).version(interaction.signal);
 			return { type: "api_key", key: undefined, env: { [OLLAMA_HOST_ENV]: baseUrl } };
 		},
 		check: async ({ ctx, credential }): Promise<AuthCheck | undefined> => {
@@ -177,10 +176,7 @@ export function createOllamaProvider(kind: OllamaProviderKind): Provider<"ollama
 			if (!context.allowNetwork || context.signal.aborted || context.credential?.type !== "api_key") {
 				return restored;
 			}
-			const client = new OllamaClient({
-				baseUrl: refreshBaseUrl(context, identity),
-				apiKey: context.credential.key,
-			});
+			const client = createClient(refreshBaseUrl(context, identity), { apiKey: context.credential.key });
 			// `loadCatalog` returns the stored catalog unchanged when `/api/tags` fails, so a
 			// broken or offline server keeps the previous list instead of an empty one.
 			return loadCatalog({
