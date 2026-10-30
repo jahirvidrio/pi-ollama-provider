@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
 	type AnyModel,
 	type ApiKeyCredential,
@@ -6,8 +6,10 @@ import {
 	type Credential,
 	type Model,
 	type ModelsPublication,
+	type ProviderAuthInteraction,
 	type RefreshModelsContext,
 } from "@earendil-works/pi-ai";
+import { OllamaError } from "../src/client.ts";
 import { DEFAULT_OLLAMA_BASE_URL, DEFAULT_OLLAMA_CLOUD_BASE_URL, createOllamaProvider } from "../src/provider.ts";
 import { startFakeOllama } from "./helpers/fake-ollama.ts";
 
@@ -37,6 +39,28 @@ function authEnv(values: Record<string, string> = {}): AuthContext {
 
 function operationSignal(): AbortSignal {
 	return new AbortController().signal;
+}
+
+/** One login prompt answer; the tests only need the prompt the provider's login issues. */
+function loginInteraction(answer: string): ProviderAuthInteraction {
+	return {
+		signal: operationSignal(),
+		prompt: async () => answer,
+		notify: () => undefined,
+	};
+}
+
+/** A `fetch` that answers nothing until its request signal aborts, for offline deadline tests. */
+function hangingFetch(_input: string | URL | Request, init?: RequestInit): Promise<Response> {
+	return new Promise((_resolve, reject) => {
+		const signal = init?.signal;
+		if (!signal) return;
+		if (signal.aborted) {
+			reject(signal.reason);
+			return;
+		}
+		signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+	});
 }
 
 interface RefreshHarness {
@@ -82,6 +106,46 @@ function storedModel(baseUrl: string): Model<"ollama-chat"> {
 }
 
 describe("ollama provider auth", () => {
+	it("bounds the local login probe with the login deadline", async () => {
+		const server = await startFakeOllama({ stallVersion: "headers" });
+		try {
+			const provider = createOllamaProvider("local", { loginMs: 150 });
+			const login = provider.auth.apiKey?.login;
+			if (!login) throw new Error("the local provider is expected to have an interactive login");
+
+			const startedAt = Date.now();
+			const error = await login(loginInteraction(server.origin)).catch((cause: unknown) => cause);
+
+			expect(error).toBeInstanceOf(OllamaError);
+			expect((error as OllamaError).kind).toBe("network");
+			expect((error as Error).message).toContain("/api/version");
+			expect((error as Error).message).toContain("timed out after 150ms");
+			expect(Date.now() - startedAt).toBeLessThan(2_000);
+		} finally {
+			await server.stop();
+		}
+	}, 10_000);
+
+	it("bounds the cloud login probe with the login deadline", async () => {
+		vi.stubGlobal("fetch", hangingFetch);
+		try {
+			const provider = createOllamaProvider("cloud", { loginMs: 150 });
+			const login = provider.auth.apiKey?.login;
+			if (!login) throw new Error("the cloud provider is expected to have an interactive login");
+
+			const startedAt = Date.now();
+			const error = await login(loginInteraction("cloud-secret")).catch((cause: unknown) => cause);
+
+			expect(error).toBeInstanceOf(OllamaError);
+			expect((error as OllamaError).kind).toBe("network");
+			expect((error as Error).message).toContain("/api/tags");
+			expect((error as Error).message).toContain("timed out after 150ms");
+			expect(Date.now() - startedAt).toBeLessThan(2_000);
+		} finally {
+			vi.unstubAllGlobals();
+		}
+	}, 10_000);
+
 	it("resolves the local provider with zero configuration", async () => {
 		const provider = createOllamaProvider("local");
 		const result = await provider.auth.apiKey?.resolve({ ctx: authEnv(), signal: operationSignal() });
@@ -145,6 +209,50 @@ describe("ollama provider auth", () => {
 });
 
 describe("ollama provider catalog", () => {
+	it("keeps the stored catalog when /api/tags outlives the catalog deadline", async () => {
+		const server = await startFakeOllama({ stallTags: "headers" });
+		const stored = storedModel(server.baseUrl);
+		try {
+			const provider = createOllamaProvider("local", { catalogMs: 150 });
+			const harness = refreshHarness({
+				allowNetwork: true,
+				credential: { type: "api_key", key: "local", env: { OLLAMA_HOST: server.origin } },
+				stored: [stored],
+			});
+
+			const startedAt = Date.now();
+			await provider.refreshModels?.(harness.context);
+
+			// A server that accepts the connection and never answers must degrade to the stored
+			// catalog, not hold the provider's list hostage forever.
+			expect(Date.now() - startedAt).toBeLessThan(2_000);
+			expect(provider.getModels()).toEqual([stored]);
+			// The catalog is best-effort: no retry after the deadline (ADR 0004).
+			expect(server.requests.filter((request) => request.path === "/api/tags")).toHaveLength(1);
+		} finally {
+			await server.stop();
+		}
+	}, 10_000);
+
+	it("keeps the stored catalog when /api/tags sends headers and stalls the body", async () => {
+		const server = await startFakeOllama({ stallTags: "body" });
+		const stored = storedModel(server.baseUrl);
+		try {
+			const provider = createOllamaProvider("local", { catalogMs: 150 });
+			const harness = refreshHarness({
+				allowNetwork: true,
+				credential: { type: "api_key", key: "local", env: { OLLAMA_HOST: server.origin } },
+				stored: [stored],
+			});
+
+			await provider.refreshModels?.(harness.context);
+
+			expect(provider.getModels()).toEqual([stored]);
+		} finally {
+			await server.stop();
+		}
+	}, 10_000);
+
 	it("publishes and persists the discovered catalog when network access is allowed", async () => {
 		const server = await startFakeOllama({ tags: TAGS, show: SHOW });
 		try {

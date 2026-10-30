@@ -111,6 +111,32 @@ describe("loadCatalog", () => {
 		}
 	});
 
+	it("keeps every model when one /api/show stalls past its deadline", async () => {
+		const server = await startFakeOllama({
+			tags: TAGS,
+			show: (body) => (body.model === "gpt-oss:20b" ? shows() : { capabilities: ["completion"] }),
+			stallShow: (model) => (model === "gemma4:31b" ? "headers" : undefined),
+		});
+		try {
+			const startedAt = Date.now();
+			const models = await loadCatalog({
+				client: new OllamaClient({ baseUrl: server.baseUrl, timeoutMs: 150 }),
+				providerId: "ollama",
+				allowNetwork: true,
+			});
+
+			// One stalled metadata request must cost that model its metadata, not the catalog.
+			expect(models.map((model) => model.id)).toEqual(["gemma4:31b", "gpt-oss:20b", "legacy:1b"]);
+			expect(models[0]?.contextWindow).toBe(4096);
+			expect(models[0]?.reasoning).toBe(false);
+			expect(models[1]?.contextWindow).toBe(131072);
+			expect(models[1]?.reasoning).toBe(true);
+			expect(Date.now() - startedAt).toBeLessThan(2_000);
+		} finally {
+			await server.stop();
+		}
+	}, 10_000);
+
 	it("returns stored models without touching the network when offline", async () => {
 		const server = await startFakeOllama({ tags: TAGS, show: shows });
 		const stored: Model<"ollama-chat">[] = [

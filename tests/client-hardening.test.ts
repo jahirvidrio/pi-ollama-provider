@@ -135,6 +135,60 @@ describe("request timeout", () => {
 	}, 10_000);
 });
 
+describe("catalog request deadlines", () => {
+	it("bounds /api/tags when the response headers never arrive", async () => {
+		const server = await startFakeOllama({ stallTags: "headers" });
+		try {
+			const client = new OllamaClient({ baseUrl: server.baseUrl, timeoutMs: 150 });
+			const startedAt = Date.now();
+			const error = await client.listModels().catch((cause: unknown) => cause);
+			const elapsed = Date.now() - startedAt;
+
+			expect(error).toBeInstanceOf(OllamaError);
+			expect((error as OllamaError).kind).toBe("network");
+			expect((error as Error).message).toContain("/api/tags");
+			expect((error as Error).message).toContain("timed out after 150ms");
+			expect(elapsed).toBeLessThan(2_000);
+		} finally {
+			await server.stop();
+		}
+	}, 10_000);
+
+	it("bounds /api/tags when the headers arrive and the body never finishes", async () => {
+		const server = await startFakeOllama({ stallTags: "body" });
+		try {
+			const client = new OllamaClient({ baseUrl: server.baseUrl, timeoutMs: 150 });
+			const startedAt = Date.now();
+			const error = await client.listModels().catch((cause: unknown) => cause);
+			const elapsed = Date.now() - startedAt;
+
+			expect(error).toBeInstanceOf(OllamaError);
+			expect((error as OllamaError).kind).toBe("network");
+			expect((error as Error).message).toContain("timed out after 150ms");
+			expect(elapsed).toBeLessThan(2_000);
+		} finally {
+			await server.stop();
+		}
+	}, 10_000);
+
+	it("keeps the caller's own abort instead of reporting the deadline", async () => {
+		const server = await startFakeOllama({ stallTags: "headers" });
+		try {
+			const controller = new AbortController();
+			const client = new OllamaClient({ baseUrl: server.baseUrl, timeoutMs: 30_000 });
+			const pending = client.listModels(controller.signal).catch((cause: unknown) => cause);
+			await new Promise((resolve) => setTimeout(resolve, 50));
+			controller.abort();
+
+			const error = (await pending) as Error;
+			expect(error.name).toBe("AbortError");
+			expect(error.message).not.toContain("timed out");
+		} finally {
+			await server.stop();
+		}
+	}, 10_000);
+});
+
 describe("caller cancellation", () => {
 	it("rejects without sending when the caller signal is already aborted", async () => {
 		const server = await startFakeOllama();
@@ -217,6 +271,50 @@ describe("caller cancellation", () => {
 });
 
 describe("error bodies", () => {
+	it("parses the error field of a JSON body larger than the display cap", async () => {
+		const server = await startFakeOllama({
+			chat: { status: 500, body: { error: "boom", pad: "x".repeat(8_000) } },
+		});
+		try {
+			// `maxRetries: 0` keeps the one queued reply: a 5xx is retryable by default, and a second
+			// attempt would consume the fake server's default success reply instead.
+			const error = await new OllamaClient({ baseUrl: server.baseUrl, maxRetries: 0 })
+				.chat(REQUEST)
+				.next()
+				.catch((cause: unknown) => cause);
+
+			expect(error).toBeInstanceOf(OllamaError);
+			expect((error as OllamaError).status).toBe(500);
+			// The body is 8 KB: past the 4 KB display cap but inside the parse budget, so the user
+			// reads the server's message instead of a truncated fragment of its JSON envelope.
+			expect((error as Error).message).toBe("500: boom");
+		} finally {
+			await server.stop();
+		}
+	});
+
+	it("does not parse a JSON error body past the secondary cap", async () => {
+		const server = await startFakeOllama({
+			chat: { status: 500, body: { error: "boom", pad: "x".repeat(200_000) } },
+		});
+		try {
+			const error = await new OllamaClient({ baseUrl: server.baseUrl, maxRetries: 0 })
+				.chat(REQUEST)
+				.next()
+				.catch((cause: unknown) => cause);
+
+			expect(error).toBeInstanceOf(OllamaError);
+			expect((error as OllamaError).status).toBe(500);
+			// 200 KB is not worth parsing: the capped raw body is shown, with its own marker,
+			// instead of spending the parse on a body that could not fit the transcript anyway.
+			expect((error as Error).message).toContain('{"error":"boom"');
+			expect((error as Error).message).toContain("truncated");
+			expect((error as Error).message.length).toBeLessThan(4_200);
+		} finally {
+			await server.stop();
+		}
+	});
+
 	it("caps a huge error body instead of keeping all of it", async () => {
 		const server = await startFakeOllama({ chat: { status: 500, body: { error: "x".repeat(2_000_000) } } });
 		try {

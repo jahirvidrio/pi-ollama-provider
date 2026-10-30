@@ -83,7 +83,7 @@ function refreshBaseUrl(context: RefreshModelsContext, identity: ProviderIdentit
 	return (configured ? normalizeOllamaBaseUrl(configured) : undefined) ?? identity.defaultBaseUrl;
 }
 
-function apiKeyAuth(identity: ProviderIdentity): ApiKeyAuth {
+function apiKeyAuth(identity: ProviderIdentity, loginMs: number): ApiKeyAuth {
 	const local = identity.kind === "local";
 	return {
 		name: local ? "Ollama server" : "Ollama Cloud API key",
@@ -91,9 +91,11 @@ function apiKeyAuth(identity: ProviderIdentity): ApiKeyAuth {
 			if (!local) {
 				const key = (await interaction.prompt({ type: "secret", message: "Ollama Cloud API key" })).trim();
 				// Verifying against `/api/tags` proves the key before it is persisted.
-				await createClient(identity.defaultBaseUrl, { apiKey: key || undefined }).listModels(
-					interaction.signal,
-				);
+				await createClient(
+					identity.defaultBaseUrl,
+					{ apiKey: key || undefined },
+					{ timeoutMs: loginMs },
+				).listModels(interaction.signal);
 				return { type: "api_key", key: key || undefined, env: { [OLLAMA_HOST_ENV]: identity.defaultBaseUrl } };
 			}
 			const fallback = process.env[OLLAMA_HOST_ENV] ?? identity.defaultBaseUrl;
@@ -103,7 +105,7 @@ function apiKeyAuth(identity: ProviderIdentity): ApiKeyAuth {
 				placeholder: fallback,
 			});
 			const baseUrl = normalizeOllamaBaseUrl(entered.trim() || fallback);
-			await createClient(baseUrl).version(interaction.signal);
+			await createClient(baseUrl, undefined, { timeoutMs: loginMs }).version(interaction.signal);
 			return { type: "api_key", key: undefined, env: { [OLLAMA_HOST_ENV]: baseUrl } };
 		},
 		check: async ({ ctx, credential }): Promise<AuthCheck | undefined> => {
@@ -148,19 +150,48 @@ function isOwnChatModel(model: AnyModel, providerId: string): model is Model<"ol
 }
 
 /**
+ * Budget for one catalog refresh: `/api/tags` plus the `/api/show` fan-out. A server that accepts
+ * the connection and never answers is not an exception, so without a deadline the stored-catalog
+ * fallback in `loadCatalog` would never fire and the provider would stay without models. The
+ * refresh then degrades to the stored list and the next one retries by itself: the catalog is
+ * best-effort and never retried inside one refresh (ADR 0004).
+ */
+export const CATALOG_TIMEOUT_MS = 30_000;
+
+/** Budget for the login probe: a server that cannot verify inside it is not usable right now. */
+export const LOGIN_TIMEOUT_MS = 15_000;
+
+/**
+ * Deadlines the provider gives its own non-chat requests. The defaults fit a local server or a
+ * public cloud endpoint; a host may retune them, and a test shortens them to reach the fallback
+ * path without waiting the whole budget.
+ */
+export interface OllamaProviderTimeouts {
+	/** One catalog refresh (`/api/tags` plus each `/api/show`); defaults to {@link CATALOG_TIMEOUT_MS}. */
+	catalogMs?: number;
+	/** One login probe (`/api/version` or `/api/tags`); defaults to {@link LOGIN_TIMEOUT_MS}. */
+	loginMs?: number;
+}
+
+/**
  * Builds one of the two Ollama providers. `createProvider` owns the transactional catalog
  * contract: it restores `context.stored` before any network access and persists whatever
  * `fetchModels` returns with `checkedAt`, so this factory only has to produce the list.
  */
-export function createOllamaProvider(kind: OllamaProviderKind): Provider<"ollama-chat"> {
+export function createOllamaProvider(
+	kind: OllamaProviderKind,
+	timeouts: OllamaProviderTimeouts = {},
+): Provider<"ollama-chat"> {
 	const identity = IDENTITIES[kind];
 	const config = { kind: identity.kind };
+	const catalogMs = timeouts.catalogMs ?? CATALOG_TIMEOUT_MS;
+	const loginMs = timeouts.loginMs ?? LOGIN_TIMEOUT_MS;
 
 	return createProvider<"ollama-chat">({
 		id: identity.id,
 		name: identity.name,
 		baseUrl: identity.defaultBaseUrl,
-		auth: { apiKey: apiKeyAuth(identity) },
+		auth: { apiKey: apiKeyAuth(identity, loginMs) },
 		// Purely dynamic: the catalog comes from the server, never from a static list.
 		models: [],
 		api: {
@@ -176,9 +207,13 @@ export function createOllamaProvider(kind: OllamaProviderKind): Provider<"ollama
 			if (!context.allowNetwork || context.signal.aborted || context.credential?.type !== "api_key") {
 				return restored;
 			}
-			const client = createClient(refreshBaseUrl(context, identity), { apiKey: context.credential.key });
-			// `loadCatalog` returns the stored catalog unchanged when `/api/tags` fails, so a
-			// broken or offline server keeps the previous list instead of an empty one.
+			const client = createClient(
+				refreshBaseUrl(context, identity),
+				{ apiKey: context.credential.key },
+				{ timeoutMs: catalogMs },
+			);
+			// `loadCatalog` returns the stored catalog unchanged when `/api/tags` fails, and the
+			// deadline turns a server that never answers into exactly that failure instead of a hang.
 			return loadCatalog({
 				client,
 				providerId: identity.id,

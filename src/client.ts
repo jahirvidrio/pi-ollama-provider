@@ -134,6 +134,14 @@ function abortReason(
  */
 const MAX_ERROR_BODY_CHARS = 4000;
 
+/**
+ * Largest JSON error body that is parsed whole. Cap-then-parse keeps the envelope intact up to
+ * here, so a server that explains itself in a long JSON payload still contributes its message;
+ * past it the capped raw body is shown instead of paying for a parse that cannot fit the
+ * transcript either. Anything at or below the 4 KB display cap parses in both designs.
+ */
+const MAX_PARSED_ERROR_BODY_CHARS = 64 * 1024;
+
 export function capErrorBody(text: string): string {
 	const trimmed = text.trim();
 	if (trimmed.length <= MAX_ERROR_BODY_CHARS) return trimmed;
@@ -141,14 +149,14 @@ export function capErrorBody(text: string): string {
 }
 
 function providerMessage(text: string): string {
-	const capped = capErrorBody(text);
+	if (text.length > MAX_PARSED_ERROR_BODY_CHARS) return capErrorBody(text);
 	try {
-		const parsed = JSON.parse(capped) as { error?: unknown };
+		const parsed = JSON.parse(text) as { error?: unknown };
 		if (typeof parsed.error === "string") return capErrorBody(parsed.error);
 	} catch {
 		// Not JSON: the capped raw body is the best description available.
 	}
-	return capped;
+	return capErrorBody(text);
 }
 
 /** Status and headers of an Ollama HTTP response, mirroring Pi's `ProviderResponse`. */
@@ -172,10 +180,12 @@ export interface OllamaClientOptions {
 	/** Fetch implementation supplied by Pi for the current request. */
 	fetch?: typeof globalThis.fetch;
 	/**
-	 * Abort a chat request when the server goes this long without progress: from the
-	 * request send until the response headers arrive, and then while awaiting each body
-	 * chunk. Caller work (the `onResponse` hook and consuming yielded chunks) never counts
-	 * against it. Pi passes its own request timeout here.
+	 * Abort a request when the server goes this long without progress. A chat request has an idle
+	 * window: from the send until the response headers arrive, then while awaiting each body
+	 * chunk, and caller work never counts against it. The JSON endpoints (`/version`, `/tags`,
+	 * `/show`) have no progress to observe, so they get this as a deadline for the whole exchange,
+	 * body included; the catalog and the login probes pass their own budgets. Pi passes its own
+	 * request timeout here.
 	 */
 	timeoutMs?: number;
 	/**
@@ -261,15 +271,36 @@ export class OllamaClient {
 		);
 	}
 
+	/** The error that closes one JSON request whose whole budget ran out. */
+	private deadlineError(path: string): OllamaError {
+		return new OllamaError("network", `Ollama ${this.baseUrl}${path} timed out after ${this.timeoutMs}ms`);
+	}
+
+	/**
+	 * One deadline for the whole exchange of a JSON endpoint: send, headers and body. Unlike a
+	 * chat stream there is no progress to re-arm the window on, and aborting the fetch signal also
+	 * aborts the body read, so a server that sends headers and never finishes the payload is
+	 * covered without a second mechanism.
+	 */
 	private async json<T>(path: string, init: RequestInit, signal?: AbortSignal): Promise<T> {
+		// A non-positive or absent budget means no deadline, which is what the chat idle window
+		// also decides, so `timeoutMs: 0` disables both.
+		const deadline =
+			this.timeoutMs !== undefined && this.timeoutMs > 0 ? AbortSignal.timeout(this.timeoutMs) : undefined;
+		const requestSignal =
+			deadline === undefined ? signal : signal === undefined ? deadline : AbortSignal.any([signal, deadline]);
+		// The caller's own abort wins over the deadline that may fire alongside it, so a cancelled
+		// request keeps reporting `AbortError` instead of a timeout the caller caused.
+		const timedOut = (): boolean => deadline?.aborted === true && signal?.aborted !== true;
 		let response: Response;
 		try {
 			response = await this.fetchImpl(`${this.baseUrl}${path}`, {
 				...init,
 				headers: this.requestHeaders(init.headers as Record<string, string | null> | undefined),
-				signal,
+				signal: requestSignal,
 			});
 		} catch (error) {
+			if (timedOut()) throw this.deadlineError(path);
 			if (isAbort(error, signal)) throw error;
 			throw new OllamaError(
 				"network",
@@ -277,7 +308,11 @@ export class OllamaClient {
 			);
 		}
 		if (!response.ok) {
-			const text = await response.text().catch(() => "");
+			const text = await response.text().catch((error: unknown) => {
+				if (timedOut()) throw this.deadlineError(path);
+				if (isAbort(error, signal)) throw error;
+				return "";
+			});
 			throw new OllamaError(
 				"http",
 				`${response.status}: ${providerMessage(text)}`,
@@ -288,6 +323,8 @@ export class OllamaClient {
 		try {
 			return (await response.json()) as T;
 		} catch (error) {
+			if (timedOut()) throw this.deadlineError(path);
+			if (isAbort(error, signal)) throw error;
 			throw new OllamaError(
 				"protocol",
 				`Ollama returned an invalid JSON body: ${error instanceof Error ? error.message : String(error)}`,

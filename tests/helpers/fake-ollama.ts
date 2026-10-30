@@ -39,12 +39,24 @@ export interface RecordedRequest {
  */
 export type FakeShowResponder = (body: Record<string, unknown>) => unknown;
 
+/**
+ * How a stalled endpoint answers: never send the headers, or send them and never finish the body,
+ * so a client either waits to establish the response or waits for its payload.
+ */
+export type FakeStall = "headers" | "body";
+
 export interface FakeOllamaOptions {
 	version?: string;
 	tags?: unknown;
 	show?: object | FakeShowResponder;
 	/** First queued chat answer, equivalent to calling `respond()` right after startup. */
 	chat?: FakeOllamaReply;
+	/** Stall `GET /api/version`, the local login probe. */
+	stallVersion?: FakeStall;
+	/** Stall `GET /api/tags`, the catalog and cloud login probe. */
+	stallTags?: FakeStall;
+	/** Stall `POST /api/show` for the models named here, leaving the rest of the catalog intact. */
+	stallShow?: (model: string) => FakeStall | undefined;
 }
 
 export interface FakeOllama {
@@ -85,6 +97,13 @@ function writeJson(
 		...headers,
 	});
 	response.end(text);
+}
+
+/** Leave a response hanging in the phase named by `mode`, until the client drops the socket. */
+function stall(response: ServerResponse, mode: FakeStall): void {
+	if (mode === "headers") return;
+	response.writeHead(200, { "content-type": "application/json" });
+	response.flushHeaders();
 }
 
 async function writeStream(
@@ -132,15 +151,29 @@ export async function startFakeOllama(options: FakeOllamaOptions = {}): Promise<
 			requests.push({ method: request.method ?? "GET", path, headers: request.headers, body });
 
 			if (request.method === "GET" && path === "/api/version") {
+				if (options.stallVersion) {
+					stall(response, options.stallVersion);
+					return;
+				}
 				writeJson(response, 200, { version: options.version ?? "0.12.6" });
 				return;
 			}
 			if (request.method === "GET" && path === "/api/tags") {
+				if (options.stallTags) {
+					stall(response, options.stallTags);
+					return;
+				}
 				writeJson(response, 200, tags);
 				return;
 			}
 			if (request.method === "POST" && path === "/api/show") {
-				const payload = typeof show === "function" ? show(body) : show;
+				const model = (body as { model?: unknown } | undefined)?.model;
+				const stallMode = typeof model === "string" ? options.stallShow?.(model) : undefined;
+				if (stallMode) {
+					stall(response, stallMode);
+					return;
+				}
+				const payload = typeof show === "function" ? show(body as Record<string, unknown>) : show;
 				writeJson(response, 200, payload);
 				return;
 			}
