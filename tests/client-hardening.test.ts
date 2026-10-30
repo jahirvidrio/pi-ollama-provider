@@ -5,6 +5,10 @@ import { startFakeOllama } from "./helpers/fake-ollama.ts";
 
 const REQUEST = { model: "gemma4:31b", messages: [{ role: "user" as const, content: "hi" }] };
 
+// These tests prove a deadline fired by the error it produced and by their own test timeout
+// catching a hang, never by a wall-clock comparison: `elapsed < 2_000` measures the machine, not
+// the code, and fails on a loaded box while telling nothing about the adapter.
+
 describe("request timeout", () => {
 	it("aborts a stream that stalls after the headers, and names the timeout", async () => {
 		const server = await startFakeOllama({
@@ -17,13 +21,10 @@ describe("request timeout", () => {
 			const first = await iterator.next();
 			expect(first.value).toMatchObject({ message: { content: "partial" } });
 
-			const startedAt = Date.now();
 			const error = await iterator.next().catch((cause: unknown) => cause);
-			const elapsed = Date.now() - startedAt;
 
 			expect(error).toBeInstanceOf(OllamaError);
 			expect((error as OllamaError).message).toContain("timed out");
-			expect(elapsed).toBeLessThan(2_000);
 		} finally {
 			await server.stop();
 		}
@@ -33,13 +34,10 @@ describe("request timeout", () => {
 		const server = await startFakeOllama({ chat: { hangHeaders: true } });
 		try {
 			const client = new OllamaClient({ baseUrl: server.baseUrl, timeoutMs: 150 });
-			const startedAt = Date.now();
 			const error = await client.chat(REQUEST).next().catch((cause: unknown) => cause);
-			const elapsed = Date.now() - startedAt;
 
 			expect(error).toBeInstanceOf(OllamaError);
 			expect((error as OllamaError).message).toContain("timed out");
-			expect(elapsed).toBeLessThan(2_000);
 		} finally {
 			await server.stop();
 		}
@@ -140,15 +138,12 @@ describe("catalog request deadlines", () => {
 		const server = await startFakeOllama({ stallTags: "headers" });
 		try {
 			const client = new OllamaClient({ baseUrl: server.baseUrl, timeoutMs: 150 });
-			const startedAt = Date.now();
 			const error = await client.listModels().catch((cause: unknown) => cause);
-			const elapsed = Date.now() - startedAt;
 
 			expect(error).toBeInstanceOf(OllamaError);
 			expect((error as OllamaError).kind).toBe("network");
 			expect((error as Error).message).toContain("/api/tags");
 			expect((error as Error).message).toContain("timed out after 150ms");
-			expect(elapsed).toBeLessThan(2_000);
 		} finally {
 			await server.stop();
 		}
@@ -158,14 +153,11 @@ describe("catalog request deadlines", () => {
 		const server = await startFakeOllama({ stallTags: "body" });
 		try {
 			const client = new OllamaClient({ baseUrl: server.baseUrl, timeoutMs: 150 });
-			const startedAt = Date.now();
 			const error = await client.listModels().catch((cause: unknown) => cause);
-			const elapsed = Date.now() - startedAt;
 
 			expect(error).toBeInstanceOf(OllamaError);
 			expect((error as OllamaError).kind).toBe("network");
 			expect((error as Error).message).toContain("timed out after 150ms");
-			expect(elapsed).toBeLessThan(2_000);
 		} finally {
 			await server.stop();
 		}
@@ -187,6 +179,65 @@ describe("catalog request deadlines", () => {
 			await server.stop();
 		}
 	}, 10_000);
+});
+
+/** A response whose body fails mid-read: the status arrived, the description did not. */
+function unreadableBody(status: number): Response {
+	return new Response(
+		new ReadableStream({
+			start(controller) {
+				controller.error(new Error("socket closed"));
+			},
+		}),
+		{ status },
+	);
+}
+
+describe("error body descriptions", () => {
+	it("names a catalog error body it could not read", async () => {
+		// `json()` reads the body of a non-OK response to describe the failure. When that read
+		// itself fails, the message must say so: the status alone leaves "502: " in the transcript
+		// and in Pi's error patterns, which is what a user sees at the cloud login prompt.
+		const client = new OllamaClient({
+			baseUrl: "http://127.0.0.1:1/api",
+			fetch: async () => unreadableBody(502),
+		});
+
+		const error = await client.listModels().catch((cause: unknown) => cause);
+
+		expect(error).toBeInstanceOf(OllamaError);
+		expect((error as OllamaError).kind).toBe("http");
+		expect((error as OllamaError).status).toBe(502);
+		expect((error as Error).message).toBe("502: the error body could not be read (socket closed)");
+	});
+
+	it("names an empty catalog error body", async () => {
+		const client = new OllamaClient({
+			baseUrl: "http://127.0.0.1:1/api",
+			fetch: async () => new Response("", { status: 500 }),
+		});
+
+		const error = await client.listModels().catch((cause: unknown) => cause);
+
+		expect(error).toBeInstanceOf(OllamaError);
+		expect((error as OllamaError).status).toBe(500);
+		expect((error as Error).message).toBe("500: the server sent no error body");
+	});
+
+	it("names a chat error body it could not read", async () => {
+		const client = new OllamaClient({
+			baseUrl: "http://127.0.0.1:1/api",
+			maxRetries: 0,
+			fetch: async () => unreadableBody(500),
+		});
+
+		const error = await client.chat(REQUEST).next().catch((cause: unknown) => cause);
+
+		expect(error).toBeInstanceOf(OllamaError);
+		expect((error as OllamaError).kind).toBe("http");
+		expect((error as OllamaError).status).toBe(500);
+		expect((error as Error).message).toBe("500: the error body could not be read (socket closed)");
+	});
 });
 
 describe("caller cancellation", () => {

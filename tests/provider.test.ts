@@ -30,6 +30,11 @@ const SHOW = {
 /** Models the fake server serves, in `/api/tags` order, after the non-chat entry is dropped. */
 const DISCOVERED_IDS = ["gemma4:31b", "gpt-oss:20b"];
 
+// The deadline tests here prove a bound by the error the adapter produced and by their own test
+// timeout catching a hang, never by a wall-clock comparison: `elapsed < 2_000` measures the machine,
+// not the code. The hanging `fetch` below rejects a request that carries no signal, so a probe that
+// forgot its deadline fails loudly instead of waiting forever.
+
 function authEnv(values: Record<string, string> = {}): AuthContext {
 	return {
 		env: async (name) => values[name],
@@ -54,7 +59,10 @@ function loginInteraction(answer: string): ProviderAuthInteraction {
 function hangingFetch(_input: string | URL | Request, init?: RequestInit): Promise<Response> {
 	return new Promise((_resolve, reject) => {
 		const signal = init?.signal;
-		if (!signal) return;
+		if (!signal) {
+			reject(new Error("the provider must pass an abort signal to fetch"));
+			return;
+		}
 		if (signal.aborted) {
 			reject(signal.reason);
 			return;
@@ -113,14 +121,12 @@ describe("ollama provider auth", () => {
 			const login = provider.auth.apiKey?.login;
 			if (!login) throw new Error("the local provider is expected to have an interactive login");
 
-			const startedAt = Date.now();
 			const error = await login(loginInteraction(server.origin)).catch((cause: unknown) => cause);
 
 			expect(error).toBeInstanceOf(OllamaError);
 			expect((error as OllamaError).kind).toBe("network");
 			expect((error as Error).message).toContain("/api/version");
 			expect((error as Error).message).toContain("timed out after 150ms");
-			expect(Date.now() - startedAt).toBeLessThan(2_000);
 		} finally {
 			await server.stop();
 		}
@@ -133,14 +139,12 @@ describe("ollama provider auth", () => {
 			const login = provider.auth.apiKey?.login;
 			if (!login) throw new Error("the cloud provider is expected to have an interactive login");
 
-			const startedAt = Date.now();
 			const error = await login(loginInteraction("cloud-secret")).catch((cause: unknown) => cause);
 
 			expect(error).toBeInstanceOf(OllamaError);
 			expect((error as OllamaError).kind).toBe("network");
 			expect((error as Error).message).toContain("/api/tags");
 			expect((error as Error).message).toContain("timed out after 150ms");
-			expect(Date.now() - startedAt).toBeLessThan(2_000);
 		} finally {
 			vi.unstubAllGlobals();
 		}
@@ -220,12 +224,10 @@ describe("ollama provider catalog", () => {
 				stored: [stored],
 			});
 
-			const startedAt = Date.now();
 			await provider.refreshModels?.(harness.context);
 
 			// A server that accepts the connection and never answers must degrade to the stored
 			// catalog, not hold the provider's list hostage forever.
-			expect(Date.now() - startedAt).toBeLessThan(2_000);
 			expect(provider.getModels()).toEqual([stored]);
 			// The catalog is best-effort: no retry after the deadline (ADR 0004).
 			expect(server.requests.filter((request) => request.path === "/api/tags")).toHaveLength(1);

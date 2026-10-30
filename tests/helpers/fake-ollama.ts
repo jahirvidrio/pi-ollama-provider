@@ -101,6 +101,8 @@ function writeJson(
 
 /** Leave a response hanging in the phase named by `mode`, until the client drops the socket. */
 function stall(response: ServerResponse, mode: FakeStall): void {
+	// A "headers" stall is the absence of a response: doing nothing leaves the client waiting to
+	// establish it, which is exactly the phase this mode names.
 	if (mode === "headers") return;
 	response.writeHead(200, { "content-type": "application/json" });
 	response.flushHeaders();

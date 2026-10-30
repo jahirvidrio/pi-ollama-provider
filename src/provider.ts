@@ -150,11 +150,14 @@ function isOwnChatModel(model: AnyModel, providerId: string): model is Model<"ol
 }
 
 /**
- * Budget for one catalog refresh: `/api/tags` plus the `/api/show` fan-out. A server that accepts
- * the connection and never answers is not an exception, so without a deadline the stored-catalog
- * fallback in `loadCatalog` would never fire and the provider would stay without models. The
- * refresh then degrades to the stored list and the next one retries by itself: the catalog is
- * best-effort and never retried inside one refresh (ADR 0004).
+ * Deadline for one request of a catalog refresh, not for the refresh as a whole: `/api/tags` gets
+ * this budget and every `/api/show` gets it again, so a refresh of N models whose requests all
+ * stall can spend up to `CATALOG_TIMEOUT_MS` × (1 + ⌈N/4⌉), because the fan-out runs four at a
+ * time. A server that accepts the connection and never answers is not an exception, so without a
+ * deadline the stored-catalog fallback in `loadCatalog` would never fire and the provider would
+ * stay without models. A stalled request costs its model its metadata; a stalled `/api/tags` costs
+ * this refresh its network path, and the provider serves the stored list while the next refresh
+ * retries by itself: the catalog is best-effort and never retried inside one refresh (ADR 0004).
  */
 export const CATALOG_TIMEOUT_MS = 30_000;
 
@@ -167,7 +170,10 @@ export const LOGIN_TIMEOUT_MS = 15_000;
  * path without waiting the whole budget.
  */
 export interface OllamaProviderTimeouts {
-	/** One catalog refresh (`/api/tags` plus each `/api/show`); defaults to {@link CATALOG_TIMEOUT_MS}. */
+	/**
+	 * Deadline for one catalog request — `/api/tags`, and again for each `/api/show`; defaults to
+	 * {@link CATALOG_TIMEOUT_MS}. It is not a budget for the refresh as a whole: see the constant.
+	 */
 	catalogMs?: number;
 	/** One login probe (`/api/version` or `/api/tags`); defaults to {@link LOGIN_TIMEOUT_MS}. */
 	loginMs?: number;

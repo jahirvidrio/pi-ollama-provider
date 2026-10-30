@@ -112,6 +112,11 @@ function isAbort(error: unknown, signal: AbortSignal | undefined): boolean {
 	return error instanceof Error && error.name === "AbortError";
 }
 
+/** The text of a thrown value, for the messages that carry it. */
+function messageOf(error: unknown): string {
+	return error instanceof Error ? error.message : String(error);
+}
+
 /**
  * Chooses what to throw when a request or read stopped early: the caller's own abort keeps its
  * `AbortError`, while a stream aborted by the idle timer keeps the `OllamaError` that names it.
@@ -277,6 +282,16 @@ export class OllamaClient {
 	}
 
 	/**
+	 * One non-OK response as an error. The status and its headers are what Pi's retry policy reads,
+	 * and the description is what the user reads, so it never ends at a separator with nothing
+	 * after it: a body that arrived empty and one that could not be read each say which they are.
+	 */
+	private httpError(response: Response, description: string): OllamaError {
+		const detail = description.trim().length > 0 ? description : "the server sent no error body";
+		return new OllamaError("http", `${response.status}: ${detail}`, response.status, response.headers);
+	}
+
+	/**
 	 * One deadline for the whole exchange of a JSON endpoint: send, headers and body. Unlike a
 	 * chat stream there is no progress to re-arm the window on, and aborting the fetch signal also
 	 * aborts the body read, so a server that sends headers and never finishes the payload is
@@ -302,23 +317,15 @@ export class OllamaClient {
 		} catch (error) {
 			if (timedOut()) throw this.deadlineError(path);
 			if (isAbort(error, signal)) throw error;
-			throw new OllamaError(
-				"network",
-				`Could not reach Ollama at ${this.baseUrl}: ${error instanceof Error ? error.message : String(error)}`,
-			);
+			throw new OllamaError("network", `Could not reach Ollama at ${this.baseUrl}: ${messageOf(error)}`);
 		}
 		if (!response.ok) {
 			const text = await response.text().catch((error: unknown) => {
 				if (timedOut()) throw this.deadlineError(path);
 				if (isAbort(error, signal)) throw error;
-				return "";
+				throw this.httpError(response, `the error body could not be read (${messageOf(error)})`);
 			});
-			throw new OllamaError(
-				"http",
-				`${response.status}: ${providerMessage(text)}`,
-				response.status,
-				response.headers,
-			);
+			throw this.httpError(response, providerMessage(text));
 		}
 		try {
 			return (await response.json()) as T;
@@ -327,7 +334,7 @@ export class OllamaClient {
 			if (isAbort(error, signal)) throw error;
 			throw new OllamaError(
 				"protocol",
-				`Ollama returned an invalid JSON body: ${error instanceof Error ? error.message : String(error)}`,
+				`Ollama returned an invalid JSON body: ${messageOf(error)}`,
 			);
 		}
 	}
@@ -411,16 +418,19 @@ export class OllamaClient {
 				armIdleTimer();
 				if (response.ok) return response;
 				// A stalled error body surfaces the timeout that stopped it instead of an empty
-				// status line; other read failures keep the status-only message.
+				// status line; a body that cannot be read at all names that, so the caller always gets
+				// a description next to the status.
+				let readFailure: unknown;
 				const text = await response.text().catch((error: unknown) => {
 					if (controller.signal.aborted) throw abortReason(error, signal, controller.signal);
-					return "";
+					readFailure = error;
+					return undefined;
 				});
-				throw new OllamaError(
-					"http",
-					`${response.status}: ${providerMessage(text)}`,
-					response.status,
-					response.headers,
+				throw this.httpError(
+					response,
+					text === undefined
+						? `the error body could not be read (${messageOf(readFailure)})`
+						: providerMessage(text),
 				);
 			} catch (error) {
 				// One rule for an interrupted attempt, whichever side stopped it: the caller's own reason
@@ -433,7 +443,7 @@ export class OllamaClient {
 				// No response at all: the transient failure the retry policy exists to ride out.
 				throw new OllamaError(
 					"network",
-					`Could not reach Ollama at ${this.baseUrl}: ${error instanceof Error ? error.message : String(error)}`,
+					`Could not reach Ollama at ${this.baseUrl}: ${messageOf(error)}`,
 				);
 			} finally {
 				// The window covers one attempt: the wait between attempts is backoff, not the
@@ -497,7 +507,7 @@ export class OllamaClient {
 				if (error instanceof OllamaError) throw error;
 				throw new OllamaError(
 					"stream",
-					`Ollama chat stream failed: ${error instanceof Error ? error.message : String(error)}`,
+					`Ollama chat stream failed: ${messageOf(error)}`,
 				);
 			} finally {
 				clearIdleTimer();

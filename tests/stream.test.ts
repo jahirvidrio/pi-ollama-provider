@@ -8,6 +8,7 @@ import {
 	type Tool,
 	type Usage,
 	isContextOverflow,
+	isRetryableAssistantError,
 	normalizeContext,
 } from "@earendil-works/pi-ai";
 import { streamOllamaChat, type OllamaStreamOptions } from "../src/stream.ts";
@@ -493,6 +494,50 @@ describe("streamOllamaChat", () => {
 		} finally {
 			await server.stop();
 		}
+	});
+
+	// The end-of-stream message is a cross-package contract, not just prose: Pi's classifier decides
+	// whether a failed turn is retried by matching the phrasing, so losing that match turns a
+	// dropped connection into a dead turn with no retry. These two tests pin both halves — this
+	// adapter still emits the sentence, and Pi still classifies it as retryable.
+	it("emits an end-of-stream failure Pi classifies as retryable", async () => {
+		const server = await startFakeOllama({
+			chat: { chunks: [{ message: { role: "assistant", content: "partial" }, done: false }] },
+		});
+		try {
+			const events = await collect(streamOllamaChat(model({ baseUrl: server.baseUrl }), context()));
+			const message = lastMessage(events);
+
+			expect(message.errorMessage).toBe("Ollama stream ended without a completion chunk");
+			expect(isRetryableAssistantError(message)).toBe(true);
+		} finally {
+			await server.stop();
+		}
+	});
+
+	it("keeps the end-of-stream sentence retryable for Pi's classifier", () => {
+		// Spelled out on purpose: this is the exact string the adapter relies on, so a classifier
+		// that stops recognizing it fails here before a user sees a turn that is never retried.
+		const message: AssistantMessage = {
+			role: "assistant",
+			content: [],
+			api: "ollama-chat",
+			provider: "ollama",
+			model: "gemma4:31b",
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { ...ZERO_COST, total: 0 },
+			},
+			stopReason: "error",
+			errorMessage: "Ollama stream ended without a completion chunk",
+			timestamp: 0,
+		};
+
+		expect(isRetryableAssistantError(message)).toBe(true);
 	});
 });
 

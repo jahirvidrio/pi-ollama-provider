@@ -118,7 +118,6 @@ describe("loadCatalog", () => {
 			stallShow: (model) => (model === "gemma4:31b" ? "headers" : undefined),
 		});
 		try {
-			const startedAt = Date.now();
 			const models = await loadCatalog({
 				client: new OllamaClient({ baseUrl: server.baseUrl, timeoutMs: 150 }),
 				providerId: "ollama",
@@ -131,7 +130,6 @@ describe("loadCatalog", () => {
 			expect(models[0]?.reasoning).toBe(false);
 			expect(models[1]?.contextWindow).toBe(131072);
 			expect(models[1]?.reasoning).toBe(true);
-			expect(Date.now() - startedAt).toBeLessThan(2_000);
 		} finally {
 			await server.stop();
 		}
