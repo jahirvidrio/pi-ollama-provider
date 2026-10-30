@@ -18,13 +18,15 @@
 	"files": [
 		"extensions",
 		"src",
+		"vendor",
 		"README.md",
 		"LICENSE"
 	],
 	"scripts": {
 		"test": "vitest --run",
 		"test:watch": "vitest",
-		"typecheck": "tsc --noEmit"
+		"typecheck": "tsc --noEmit",
+		"vendor:check": "node scripts/vendor-check.mjs"
 	},
 	"peerDependencies": {
 		"@earendil-works/pi-ai": "*",
