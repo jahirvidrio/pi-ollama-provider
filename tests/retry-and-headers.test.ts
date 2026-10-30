@@ -241,3 +241,56 @@ describe("stream body failures", () => {
 		expect(requests).toBe(1);
 	});
 });
+
+describe("server-requested retry delays", () => {
+	// The vendored helper fails fast when the server asks for more than the retry budget. What it
+	// must not do is substitute its own text for the provider's: the status, the headers and the
+	// server's own words are what Pi's retry policy and the user need.
+	it("reports the provider's error when the server asks to wait past the retry budget", async () => {
+		const server = await startFakeOllama({
+			chat: { status: 429, headers: { "retry-after": "90" }, body: { error: "rate limited" } },
+		});
+		try {
+			const error = await failure(new OllamaClient({ baseUrl: server.baseUrl }).chat(REQUEST).next());
+
+			expect(error).toBeInstanceOf(OllamaError);
+			expect((error as OllamaError).kind).toBe("http");
+			expect((error as OllamaError).status).toBe(429);
+			expect((error as OllamaError).headers?.get("retry-after")).toBe("90");
+			expect((error as Error).message).toBe("429: rate limited (the server asked to retry after 90s)");
+			// Still one attempt: the delay is reported, never silently shortened.
+			expect(server.requests).toHaveLength(1);
+		} finally {
+			await server.stop();
+		}
+	});
+
+	it("keeps the status-only message when the response carries no retry-after", async () => {
+		const server = await startFakeOllama({ chat: { status: 400, body: { error: "bad request" } } });
+		try {
+			const error = await failure(new OllamaClient({ baseUrl: server.baseUrl }).chat(REQUEST).next());
+
+			expect((error as Error).message).toBe("400: bad request");
+			expect(server.requests).toHaveLength(1);
+		} finally {
+			await server.stop();
+		}
+	});
+
+	it("keeps the caller's abort when it interrupts the retry backoff", async () => {
+		const server = await startFakeOllama({
+			chat: { status: 429, headers: { "retry-after": "0.4" }, body: { error: "rate limited" } },
+		});
+		try {
+			const controller = new AbortController();
+			const pending = failure(new OllamaClient({ baseUrl: server.baseUrl }).chat(REQUEST, controller.signal).next());
+			setTimeout(() => controller.abort(), 50);
+
+			const error = (await pending) as Error;
+			expect(error.name).toBe("AbortError");
+			expect(server.requests).toHaveLength(1);
+		} finally {
+			await server.stop();
+		}
+	});
+});

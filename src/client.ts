@@ -164,6 +164,25 @@ function providerMessage(text: string): string {
 	return capErrorBody(text);
 }
 
+/**
+ * The delay a failed response asked for, as a readable suffix. Display only: the retry policy
+ * belongs to the vendored helper, and a delay it refuses to wait out is reported, never silently
+ * shortened. An HTTP-date `retry-after` is left out instead of being parsed a second time.
+ */
+function retryDelayHint(headers: Headers | undefined): string {
+	const milliseconds = headers?.get("retry-after-ms");
+	if (milliseconds !== null && milliseconds !== undefined) {
+		const value = Number.parseFloat(milliseconds);
+		if (Number.isFinite(value)) return ` (the server asked to retry after ${Math.ceil(value / 1000)}s)`;
+	}
+	const seconds = headers?.get("retry-after");
+	if (seconds !== null && seconds !== undefined) {
+		const value = Number.parseFloat(seconds);
+		if (Number.isFinite(value)) return ` (the server asked to retry after ${Math.ceil(value)}s)`;
+	}
+	return "";
+}
+
 /** Status and headers of an Ollama HTTP response, mirroring Pi's `ProviderResponse`. */
 export interface OllamaResponseInfo {
 	status: number;
@@ -365,6 +384,25 @@ export class OllamaClient {
 	}
 
 	/**
+	 * What to throw when establishing the response failed. The helper substitutes its own error for
+	 * the provider's in exactly two cases: the caller aborted, whose outcome stays the caller's, and a
+	 * server-requested delay above the retry budget. In the second the provider's own error is more
+	 * truthful — it carries the status, the headers Pi's policy reads and the server's own words — so
+	 * the adapter reports that one instead, naming the delay the server asked for.
+	 */
+	private retryFailure(error: unknown, lastAttemptError: unknown, signal: AbortSignal | undefined): unknown {
+		if (signal?.aborted || !(lastAttemptError instanceof OllamaError) || error === lastAttemptError) {
+			return error;
+		}
+		return new OllamaError(
+			lastAttemptError.kind,
+			`${lastAttemptError.message}${retryDelayHint(lastAttemptError.headers)}`,
+			lastAttemptError.status,
+			lastAttemptError.headers,
+		);
+	}
+
+	/**
 	 * Streams one chat completion as decoded NDJSON chunks. Chunks are yielded as soon
 	 * as their line arrives; an `error` chunk or a malformed line throws `OllamaError`
 	 * after the chunks that already arrived, because Ollama reports mid-stream failures
@@ -396,6 +434,8 @@ export class OllamaClient {
 				controller.abort(this.timeoutError());
 			}, this.timeoutMs);
 		};
+		/** The failure of the most recent attempt, which the helper may replace with its own. */
+		let lastAttemptError: unknown;
 		/**
 		 * One attempt at establishing the response, the only part a retry can replay: once the body
 		 * is being consumed a second request would duplicate the text already yielded.
@@ -436,15 +476,16 @@ export class OllamaClient {
 				// One rule for an interrupted attempt, whichever side stopped it: the caller's own reason
 				// wins, then the idle timeout that aborted this attempt, then the raw failure. Reading the
 				// two signals separately let the result depend on which abort happened to land first.
-				if (signal?.aborted || controller.signal.aborted) {
-					throw abortReason(error, signal, controller.signal);
-				}
-				if (error instanceof OllamaError) throw error;
-				// No response at all: the transient failure the retry policy exists to ride out.
-				throw new OllamaError(
-					"network",
-					`Could not reach Ollama at ${this.baseUrl}: ${messageOf(error)}`,
-				);
+				const failure =
+					signal?.aborted || controller.signal.aborted
+						? abortReason(error, signal, controller.signal)
+						: error instanceof OllamaError
+							? error
+							: // No response at all: the transient failure the retry policy exists to ride out.
+								new OllamaError("network", `Could not reach Ollama at ${this.baseUrl}: ${messageOf(error)}`);
+				// Exactly what the helper saw, for the failures it may replace with its own.
+				lastAttemptError = failure;
+				throw failure;
 			} finally {
 				// The window covers one attempt: the wait between attempts is backoff, not the
 				// server's silence, so a stale timer must not fire during the sleep.
@@ -453,13 +494,17 @@ export class OllamaClient {
 		};
 		let response: Response;
 		try {
-			response = await retryProviderRequest(attempt, {
-				maxRetries: this.maxRetries,
-				maxRetryDelayMs: this.maxRetryDelayMs,
-				// The caller's abort interrupts a backoff; the attempt controller belongs to one attempt.
-				signal,
-				noRetryStatuses: [IDLE_TIMEOUT_STATUS],
-			});
+			try {
+				response = await retryProviderRequest(attempt, {
+					maxRetries: this.maxRetries,
+					maxRetryDelayMs: this.maxRetryDelayMs,
+					// The caller's abort interrupts a backoff; the attempt controller belongs to one attempt.
+					signal,
+					noRetryStatuses: [IDLE_TIMEOUT_STATUS],
+				});
+			} catch (error) {
+				throw this.retryFailure(error, lastAttemptError, signal);
+			}
 			if (this.onResponse) {
 				// Caller work never counts against the server: pause the window while the hook runs
 				// and let the read loop start it again right before the first chunk.
