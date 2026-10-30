@@ -6,8 +6,8 @@
  * so decoding, parsing and consumer time never count against the server's budget.
  */
 export interface WaitWindow {
-	arm(): void;
-	clear(): void;
+  arm(): void;
+  clear(): void;
 }
 
 /**
@@ -22,37 +22,37 @@ export interface WaitWindow {
  * The reader belongs to this generator: an early break on the final line still cancels the stream,
  * which releases the socket instead of leaving it open until the server closes it.
  */
-export async function* readLines(
-	body: ReadableStream<Uint8Array>,
-	window?: WaitWindow,
+export async function * readLines (
+  body: ReadableStream<Uint8Array>,
+  window?: WaitWindow
 ): AsyncGenerator<string> {
-	const reader = body.getReader();
-	const decoder = new TextDecoder();
-	let tail = "";
-	try {
-		while (true) {
-			window?.arm();
-			const { done, value } = await reader.read();
-			window?.clear();
-			if (done) break;
-			const text = decoder.decode(value, { stream: true });
-			let cursor = 0;
-			let newline = text.indexOf("\n");
-			while (newline >= 0) {
-				const line = (tail + text.slice(cursor, newline)).trim();
-				tail = "";
-				if (line.length > 0) yield line;
-				cursor = newline + 1;
-				newline = text.indexOf("\n", cursor);
-			}
-			tail += text.slice(cursor);
-		}
-		tail += decoder.decode();
-		const last = tail.trim();
-		if (last.length > 0) yield last;
-	} finally {
-		window?.clear();
-		await reader.cancel().catch(() => undefined);
-		reader.releaseLock();
-	}
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  let tail = '';
+  try {
+    while (true) {
+      window?.arm();
+      const { done, value } = await reader.read();
+      window?.clear();
+      if (done) break;
+      const text = decoder.decode(value, { stream: true });
+      let cursor = 0;
+      let newline = text.indexOf('\n');
+      while (newline >= 0) {
+        const line = (tail + text.slice(cursor, newline)).trim();
+        tail = '';
+        if (line.length > 0) yield line;
+        cursor = newline + 1;
+        newline = text.indexOf('\n', cursor);
+      }
+      tail += text.slice(cursor);
+    }
+    tail += decoder.decode();
+    const last = tail.trim();
+    if (last.length > 0) yield last;
+  } finally {
+    window?.clear();
+    await reader.cancel().catch(() => undefined);
+    reader.releaseLock();
+  }
 }

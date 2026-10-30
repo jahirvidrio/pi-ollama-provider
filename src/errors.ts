@@ -4,26 +4,26 @@
  * client and the stream adapter cannot drift on what an error says or how long it may be.
  */
 
-export type OllamaErrorKind = "http" | "stream" | "network" | "protocol";
+export type OllamaErrorKind = 'http' | 'stream' | 'network' | 'protocol';
 
 export class OllamaError extends Error {
-	readonly kind: OllamaErrorKind;
-	/**
-	 * HTTP status and response headers, when a response arrived at all. Both are always own
-	 * properties, even when undefined: Pi's `isProviderError` probe requires the keys to be
-	 * present before it reads `status`, and its retry policy takes `retry-after` and
-	 * `x-should-retry` from these headers.
-	 */
-	readonly status: number | undefined;
-	readonly headers: Headers | undefined;
+  readonly kind: OllamaErrorKind;
+  /**
+   * HTTP status and response headers, when a response arrived at all. Both are always own
+   * properties, even when undefined: Pi's `isProviderError` probe requires the keys to be
+   * present before it reads `status`, and its retry policy takes `retry-after` and
+   * `x-should-retry` from these headers.
+   */
+  readonly status: number | undefined;
+  readonly headers: Headers | undefined;
 
-	constructor(kind: OllamaErrorKind, message: string, status?: number, headers?: Headers) {
-		super(message);
-		this.name = "OllamaError";
-		this.kind = kind;
-		this.status = status;
-		this.headers = headers;
-	}
+  constructor (kind: OllamaErrorKind, message: string, status?: number, headers?: Headers) {
+    super(message);
+    this.name = 'OllamaError';
+    this.kind = kind;
+    this.status = status;
+    this.headers = headers;
+  }
 }
 
 /**
@@ -42,20 +42,20 @@ const MAX_ERROR_BODY_CHARS = 4000;
  */
 const MAX_PARSED_ERROR_BODY_CHARS = 64 * 1024;
 
-export function capErrorBody(text: string): string {
-	const trimmed = text.trim();
-	if (trimmed.length <= MAX_ERROR_BODY_CHARS) return trimmed;
-	return `${trimmed.slice(0, MAX_ERROR_BODY_CHARS)}… [truncated ${trimmed.length - MAX_ERROR_BODY_CHARS} chars]`;
+export function capErrorBody (text: string): string {
+  const trimmed = text.trim();
+  if (trimmed.length <= MAX_ERROR_BODY_CHARS) return trimmed;
+  return `${trimmed.slice(0, MAX_ERROR_BODY_CHARS)}… [truncated ${trimmed.length - MAX_ERROR_BODY_CHARS} chars]`;
 }
 
 /** The message a non-OK response carries: its JSON `error` field when it has one, capped either way. */
-export function providerMessage(text: string): string {
-	if (text.length > MAX_PARSED_ERROR_BODY_CHARS) return capErrorBody(text);
-	try {
-		const parsed = JSON.parse(text) as { error?: unknown };
-		if (typeof parsed.error === "string") return capErrorBody(parsed.error);
-	} catch {
-		// Not JSON: the capped raw body is the best description available.
-	}
-	return capErrorBody(text);
+export function providerMessage (text: string): string {
+  if (text.length > MAX_PARSED_ERROR_BODY_CHARS) return capErrorBody(text);
+  try {
+    const parsed = JSON.parse(text) as { error?: unknown };
+    if (typeof parsed.error === 'string') return capErrorBody(parsed.error);
+  } catch {
+    // Not JSON: the capped raw body is the best description available.
+  }
+  return capErrorBody(text);
 }
