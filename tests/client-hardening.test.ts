@@ -237,6 +237,47 @@ describe("error bodies", () => {
 	});
 });
 
+describe("stream error payloads", () => {
+	it("caps a huge error chunk instead of embedding it in the transcript", async () => {
+		const server = await startFakeOllama({
+			chat: { rawChunks: [JSON.stringify({ error: "x".repeat(1_000_000) })] },
+		});
+		try {
+			const error = await new OllamaClient({ baseUrl: server.baseUrl })
+				.chat(REQUEST)
+				.next()
+				.catch((cause: unknown) => cause);
+
+			expect(error).toBeInstanceOf(OllamaError);
+			expect((error as OllamaError).kind).toBe("stream");
+			// The capped text reaches the transcript, the TUI and Pi's error patterns, so an
+			// unbounded payload would be paid for three times.
+			expect((error as Error).message.length).toBeLessThan(4_100);
+			expect((error as Error).message).toContain("truncated");
+		} finally {
+			await server.stop();
+		}
+	});
+
+	it("caps a huge malformed line instead of embedding it in the transcript", async () => {
+		const server = await startFakeOllama({ chat: { rawChunks: ["x".repeat(1_000_000)] } });
+		try {
+			const error = await new OllamaClient({ baseUrl: server.baseUrl })
+				.chat(REQUEST)
+				.next()
+				.catch((cause: unknown) => cause);
+
+			expect(error).toBeInstanceOf(OllamaError);
+			expect((error as OllamaError).kind).toBe("stream");
+			expect((error as Error).message).toContain("malformed stream line");
+			expect((error as Error).message.length).toBeLessThan(4_200);
+			expect((error as Error).message).toContain("truncated");
+		} finally {
+			await server.stop();
+		}
+	});
+});
+
 describe("stream boundaries", () => {
 	it("parses a final line that has no trailing newline", async () => {
 		const server = await startFakeOllama({

@@ -203,8 +203,112 @@ describe("streamOllamaChat", () => {
 			const events = await collect(streamOllamaChat(model({ baseUrl: server.baseUrl }), context()));
 			expect(types(events)).toEqual(["start", "toolcall_start", "toolcall_end", "done"]);
 			expect(events.at(-1)).toMatchObject({ type: "done", reason: "toolUse" });
+				expect(lastMessage(events).content).toEqual([
+					{ type: "toolCall", id: "ollama_call_0", name: "read", arguments: { path: "a.ts" } },
+				]);
+		} finally {
+			await server.stop();
+		}
+	});
+
+	it("buffers a tool call split across chunks into a single call", async () => {
+		const server = await startFakeOllama({
+			chat: {
+				chunks: [
+					{
+						message: { role: "assistant", content: "", tool_calls: [{ function: { name: "read", arguments: {} } }] },
+						done: false,
+					},
+					{
+						message: { role: "assistant", content: "", tool_calls: [{ function: { arguments: { path: "a.ts" } } }] },
+						done: false,
+					},
+					{ message: { role: "assistant", content: "" }, done: true, done_reason: "stop" },
+				],
+			},
+		});
+		try {
+			const events = await collect(streamOllamaChat(model({ baseUrl: server.baseUrl }), context()));
+
+			// One call, emitted once: a partial call must never reach Pi as a callable tool.
+			expect(types(events)).toEqual(["start", "toolcall_start", "toolcall_end", "done"]);
 			expect(lastMessage(events).content).toEqual([
 				{ type: "toolCall", id: "ollama_call_0", name: "read", arguments: { path: "a.ts" } },
+			]);
+			expect(lastMessage(events).stopReason).toBe("toolUse");
+		} finally {
+			await server.stop();
+		}
+	});
+
+	it("parses tool call arguments delivered as a JSON string", async () => {
+		const server = await startFakeOllama({
+			chat: {
+				chunks: [
+					{
+						message: { role: "assistant", content: "", tool_calls: [{ function: { name: "read", arguments: '{"path":"a.ts"}' } }] },
+						done: true,
+						done_reason: "stop",
+					},
+				],
+			},
+		});
+		try {
+			const events = await collect(streamOllamaChat(model({ baseUrl: server.baseUrl }), context()));
+
+			expect(lastMessage(events).content).toEqual([
+				{ type: "toolCall", id: "ollama_call_0", name: "read", arguments: { path: "a.ts" } },
+			]);
+		} finally {
+			await server.stop();
+		}
+	});
+
+	it("drops a tool call with no name and keeps the turn's text visible", async () => {
+		const server = await startFakeOllama({
+			chat: {
+				chunks: [
+					{ message: { role: "assistant", content: "hello" }, done: false },
+					{
+						message: { role: "assistant", content: "", tool_calls: [{ function: { arguments: { path: "a.ts" } } }] },
+						done: true,
+						done_reason: "stop",
+					},
+				],
+			},
+		});
+		try {
+			const events = await collect(streamOllamaChat(model({ baseUrl: server.baseUrl }), context()));
+
+			expect(types(events)).toEqual(["start", "text_start", "text_delta", "text_delta", "text_end", "done"]);
+			expect(lastMessage(events).stopReason).toBe("stop");
+			expect(lastMessage(events).content).toEqual([
+				{ type: "text", text: "hello\n[dropped a malformed tool call from the server]" },
+			]);
+		} finally {
+			await server.stop();
+		}
+	});
+
+	it("drops a tool call whose arguments are not a JSON object", async () => {
+		const server = await startFakeOllama({
+			chat: {
+				chunks: [
+					{ message: { role: "assistant", content: "hello" }, done: false },
+					{
+						message: { role: "assistant", content: "", tool_calls: [{ function: { name: "read", arguments: "{not json" } }] },
+						done: true,
+						done_reason: "stop",
+					},
+				],
+			},
+		});
+		try {
+			const events = await collect(streamOllamaChat(model({ baseUrl: server.baseUrl }), context()));
+
+			expect(types(events).filter((type) => type.startsWith("toolcall"))).toEqual([]);
+			expect(lastMessage(events).content).toEqual([
+				{ type: "text", text: "hello\n[dropped a malformed tool call from the server]" },
 			]);
 		} finally {
 			await server.stop();

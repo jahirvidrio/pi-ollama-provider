@@ -8,14 +8,22 @@ import {
 	type SimpleStreamOptions,
 	type TextContent,
 	type ThinkingContent,
+	type ToolCall,
 	type TranscriptContext,
 	type Usage,
 	calculateCost,
 	createAssistantMessageEventStream,
 	getCurrentSystemPrompt,
 	getCurrentTools,
+	parseToolCallArguments,
 } from "@earendil-works/pi-ai";
-import { createClient, OllamaError, type OllamaChatChunk, type OllamaChatRequest } from "./client.ts";
+import {
+	createClient,
+	OllamaError,
+	type OllamaChatChunk,
+	type OllamaChatRequest,
+	type OllamaToolCall,
+} from "./client.ts";
 import { buildOllamaMessages, ollamaToolCallToPi, toOllamaTools } from "./convert.ts";
 import { transformMessages } from "../vendor/pi-ai/api/transform-messages.js";
 
@@ -143,14 +151,62 @@ function errorText(error: unknown, aborted: boolean): string {
 	return String(error);
 }
 
+/** Notice appended to the assistant text when the server sends a tool call Pi cannot run. */
+const DROPPED_TOOL_CALL_NOTICE = "[dropped a malformed tool call from the server]";
+
+/** One tool call as it accumulates across chunks; see {@link mergeToolCall}. */
+interface BufferedToolCall {
+	name: string;
+	arguments: Record<string, unknown>;
+	/** Set when an arriving fragment broke a rule; a later chunk cannot repair the call. */
+	malformed: boolean;
+}
+
+/**
+ * Reads one fragment's `arguments` as an object. Ollama sends an object, but a partial call or an
+ * intermediary can send the JSON text instead, which is exactly the case Pi's own
+ * `parseToolCallArguments` handles: anything that is not a JSON object is rejected, and its repair
+ * step also rescues the control characters a model sometimes leaves inside a string.
+ */
+function argumentsOf(value: unknown): { ok: true; value: Record<string, unknown> } | { ok: false } {
+	if (value === undefined || value === null) return { ok: true, value: {} };
+	if (typeof value === "object" && !Array.isArray(value)) {
+		return { ok: true, value: value as Record<string, unknown> };
+	}
+	if (typeof value !== "string") return { ok: false };
+	const parsed = parseToolCallArguments(value);
+	return parsed.argumentsError === undefined
+		? { ok: true, value: parsed.arguments as Record<string, unknown> }
+		: { ok: false };
+}
+
+/**
+ * Merges one arriving fragment into the call buffered at the same position. A non-empty name wins
+ * over an empty one and arguments merge shallowly, because Ollama may split one call across
+ * chunks. A fragment that breaks a rule poisons the whole call: dropping it is safer than handing
+ * `validateToolArguments` a call that throws after the turn's text already reached the user.
+ */
+function mergeToolCall(into: BufferedToolCall | undefined, fragment: OllamaToolCall): BufferedToolCall {
+	const merged = into ?? { name: "", arguments: {}, malformed: false };
+	const parts = fragment as { function?: { name?: unknown; arguments?: unknown } };
+	const name = parts.function?.name;
+	if (typeof name === "string" && name.trim().length > 0) merged.name = name;
+	const incoming = argumentsOf(parts.function?.arguments);
+	if (incoming.ok) merged.arguments = { ...merged.arguments, ...incoming.value };
+	else merged.malformed = true;
+	return merged;
+}
+
 /**
  * Streams one Ollama chat completion as Pi assistant events.
  *
- * Text and thinking are streamed as they arrive; Ollama delivers tool calls already
- * complete (arguments are an object), so each call emits `toolcall_start` immediately
- * followed by `toolcall_end` and no deltas. Every request-shaping fact (context window,
- * thinking levels) is read from the model itself. Failures never throw: they terminate
- * the stream with one `error` event.
+ * Text and thinking are streamed as they arrive. Tool calls are buffered until the stream's
+ * final chunk, because Ollama documents `message.tool_calls` as "partial tool calls": a name
+ * can arrive in one chunk and its arguments in another, and emitting per chunk would hand Pi
+ * two broken calls instead of one. Each runnable call then emits `toolcall_start` immediately
+ * followed by `toolcall_end` and no deltas, since Ollama never streams argument fragments.
+ * Every request-shaping fact (context window, thinking levels) is read from the model itself.
+ * Failures never throw: they terminate the stream with one `error` event.
  */
 export function streamOllamaChat(
 	model: Model<"ollama-chat">,
@@ -222,6 +278,48 @@ export function streamOllamaChat(
 
 			let finalChunk: OllamaChatChunk | undefined;
 			let toolCallCount = 0;
+			/** Calls accumulate here by arrival position and are emitted together at `done`. */
+			const toolCalls = new Map<number, BufferedToolCall>();
+			const flushToolCalls = (): void => {
+				const runnable: ToolCall[] = [];
+				let dropped = 0;
+				for (const call of toolCalls.values()) {
+					if (call.malformed || call.name.length === 0) {
+						dropped += 1;
+						continue;
+					}
+					runnable.push(
+						ollamaToolCallToPi({ function: { name: call.name, arguments: call.arguments } }, toolCallCount),
+					);
+					toolCallCount += 1;
+				}
+				if (dropped > 0) {
+					// Degrade visibly instead of failing the turn: the text above may already be the answer
+					// the user is reading, and a call Pi cannot validate would throw mid-turn.
+					if (!textBlock) {
+						closeThinking();
+						textBlock = { type: "text", text: "" };
+						output.content.push(textBlock);
+						stream.push({ type: "text_start", contentIndex: output.content.length - 1, partial: output });
+					}
+					const notice = Array.from({ length: dropped }, () => DROPPED_TOOL_CALL_NOTICE).join("\n");
+					const delta = textBlock.text.length > 0 ? `\n${notice}` : notice;
+					textBlock.text += delta;
+					stream.push({
+						type: "text_delta",
+						contentIndex: output.content.indexOf(textBlock),
+						delta,
+						partial: output,
+					});
+				}
+				closeBlocks();
+				for (const toolCall of runnable) {
+					output.content.push(toolCall);
+					const contentIndex = output.content.length - 1;
+					stream.push({ type: "toolcall_start", contentIndex, partial: output });
+					stream.push({ type: "toolcall_end", contentIndex, toolCall, partial: output });
+				}
+			};
 			for await (const chunk of client.chat(request, options?.signal)) {
 				const incoming = chunk.message?.thinking;
 				if (incoming) {
@@ -263,15 +361,11 @@ export function streamOllamaChat(
 
 				const calls = chunk.message?.tool_calls;
 				if (calls && calls.length > 0) {
-					closeBlocks();
-					for (const call of calls) {
-						const toolCall = ollamaToolCallToPi(call, toolCallCount);
-						toolCallCount += 1;
-						output.content.push(toolCall);
-						const contentIndex = output.content.length - 1;
-						stream.push({ type: "toolcall_start", contentIndex, partial: output });
-						stream.push({ type: "toolcall_end", contentIndex, toolCall, partial: output });
-					}
+					// Buffer by position, never emit here: a name and its arguments can arrive in different
+					// chunks, and emitting per chunk would give Pi two calls it cannot run.
+					calls.forEach((call, index) => {
+						toolCalls.set(index, mergeToolCall(toolCalls.get(index), call));
+					});
 				}
 
 				if (chunk.done) {
@@ -287,7 +381,8 @@ export function streamOllamaChat(
 				throw new OllamaError("stream", "Ollama stream ended without a completion chunk");
 			}
 
-			closeBlocks();
+			// Flushes the buffered calls (and closes the open blocks) before the reason is computed.
+			flushToolCalls();
 			const hasToolCall = output.content.some((block) => block.type === "toolCall");
 			const reason: "stop" | "length" | "toolUse" =
 				finalChunk?.done_reason === "length" ? "length" : hasToolCall ? "toolUse" : "stop";
@@ -296,6 +391,8 @@ export function streamOllamaChat(
 			stream.push({ type: "done", reason, message: output });
 			stream.end();
 		} catch (error) {
+			// A failed turn keeps the text it already streamed but drops any buffered tool call: Pi
+			// discards an errored assistant turn, and a call from a broken stream must never be runnable.
 			closeBlocks();
 			const aborted =
 				options?.signal?.aborted === true || (error instanceof Error && error.name === "AbortError");

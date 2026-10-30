@@ -126,10 +126,15 @@ function abortReason(
 	return reason instanceof OllamaError ? reason : error;
 }
 
-/** Same cap Pi's `error-body` helper applies, so a hostile or buggy server cannot inflate the transcript. */
+/**
+ * Same cap Pi's `error-body` helper applies, so a hostile or buggy server cannot inflate the
+ * transcript. Reused for an error chunk and for a malformed stream line: both end up in
+ * `errorMessage`, which the transcript persists, the TUI renders and Pi matches its error
+ * patterns against.
+ */
 const MAX_ERROR_BODY_CHARS = 4000;
 
-function capErrorBody(text: string): string {
+export function capErrorBody(text: string): string {
 	const trimmed = text.trim();
 	if (trimmed.length <= MAX_ERROR_BODY_CHARS) return trimmed;
 	return `${trimmed.slice(0, MAX_ERROR_BODY_CHARS)}… [truncated ${trimmed.length - MAX_ERROR_BODY_CHARS} chars]`;
@@ -381,11 +386,12 @@ export class OllamaClient {
 					response.headers,
 				);
 			} catch (error) {
-				// The caller's own abort keeps its reason and ends the retry loop.
-				if (signal?.aborted) throw error;
-				// The idle timer aborted this attempt: a provider-shaped error with a status the policy
-				// is told to leave alone, so a bounded wait is never multiplied by the retry budget.
-				if (controller.signal.aborted) throw this.timeoutError();
+				// One rule for an interrupted attempt, whichever side stopped it: the caller's own reason
+				// wins, then the idle timeout that aborted this attempt, then the raw failure. Reading the
+				// two signals separately let the result depend on which abort happened to land first.
+				if (signal?.aborted || controller.signal.aborted) {
+					throw abortReason(error, signal, controller.signal);
+				}
 				if (error instanceof OllamaError) throw error;
 				// No response at all: the transient failure the retry policy exists to ride out.
 				throw new OllamaError(
@@ -477,14 +483,14 @@ export class OllamaClient {
 		try {
 			parsed = JSON.parse(line);
 		} catch {
-			throw new OllamaError("stream", `Ollama sent a malformed stream line: ${line}`);
+			throw new OllamaError("stream", `Ollama sent a malformed stream line: ${capErrorBody(line)}`);
 		}
 		if (parsed === null || typeof parsed !== "object") {
-			throw new OllamaError("stream", `Ollama sent a non-object stream line: ${line}`);
+			throw new OllamaError("stream", `Ollama sent a non-object stream line: ${capErrorBody(line)}`);
 		}
 		const chunk = parsed as OllamaChatChunk;
 		if (typeof chunk.error === "string") {
-			throw new OllamaError("stream", chunk.error);
+			throw new OllamaError("stream", capErrorBody(chunk.error));
 		}
 		return chunk;
 	}

@@ -202,3 +202,42 @@ describe("request headers", () => {
 		}
 	});
 });
+
+describe("stream body failures", () => {
+	it("does not retry a request whose body failed after the response was established", async () => {
+		let requests = 0;
+		let pulls = 0;
+		const encoder = new TextEncoder();
+		const client = new OllamaClient({
+			baseUrl: "http://127.0.0.1:1/api",
+			maxRetries: 2,
+			fetch: async () => {
+				requests += 1;
+				const body = new ReadableStream<Uint8Array>({
+					pull(controller) {
+						pulls += 1;
+						if (pulls === 1) {
+							controller.enqueue(
+								encoder.encode(`${JSON.stringify({ message: { content: "ok" }, done: false })}\n`),
+							);
+							return;
+						}
+						controller.error(new Error("socket died"));
+					},
+				});
+				return new Response(body, { status: 200, headers: { "content-type": "application/x-ndjson" } });
+			},
+		});
+
+		const iterator = client.chat(REQUEST);
+		const first = await iterator.next();
+		const error = await iterator.next().catch((cause: unknown) => cause);
+
+		expect(first.value).toMatchObject({ message: { content: "ok" } });
+		// The text above already reached the caller, so a second request would replay it.
+		expect(error).toBeInstanceOf(OllamaError);
+		expect((error as OllamaError).kind).toBe("stream");
+		expect((error as Error).message).toContain("socket died");
+		expect(requests).toBe(1);
+	});
+});
