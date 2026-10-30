@@ -27,6 +27,21 @@ export class OllamaError extends Error {
 }
 
 /**
+ * One non-OK response as an error. The status and its headers are what Pi's retry policy reads,
+ * and the description is what the user reads, so it never ends at a separator with nothing
+ * after it: a body that arrived empty and one that could not be read each say which they are.
+ */
+export function httpError (response: Response, description: string): OllamaError {
+  const detail = description.trim().length > 0 ? description : 'the server sent no error body';
+  return new OllamaError('http', `${response.status}: ${detail}`, response.status, response.headers);
+}
+
+/** The text of a thrown value, for the messages that carry it. */
+export function messageOf (error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+/**
  * Same cap Pi's `error-body` helper applies, so a hostile or buggy server cannot inflate the
  * transcript. Reused for an error chunk and for a malformed stream line: both end up in
  * `errorMessage`, which the transcript persists, the TUI renders and Pi matches its error
