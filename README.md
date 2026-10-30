@@ -76,6 +76,33 @@ reports the true context window and offers only the reasoning levels the model a
 `prompt_eval_count`, `prompt_eval_cached_count` (reported as cache reads) and `eval_count`.
 Ollama publishes no per-token pricing, so cost is zero.
 
+## Why this adapter does not use `ollama-js`
+
+Ollama ships an official JavaScript client (`ollama-js`, MIT, still pre-1.0). It was evaluated
+and deliberately **not** adopted: it speaks the same `/api/*` wire this adapter already speaks and
+implements none of the contracts a Pi provider has to honor — the ones the retry, header, timeout
+and error handling in `src/client.ts` exists for.
+
+On the published `ollama@0.6.4` artifact:
+
+| Pi contract | `ollama-js` 0.6.4 |
+| --- | --- |
+| Per-request abort (`AbortSignal`) | `chat(request)` accepts no signal; streaming uses its own controller, and `abort()` cancels **every** in-flight stream on the client. |
+| `onResponse` before the body | The streaming path discards the `Response`, so status and headers are never observable. |
+| Retry policy participation | No retries, and `ResponseError(message, status_code)` carries no `headers`, so Pi's `isProviderError` probe rejects it. |
+| Idle window per chunk (`timeoutMs`) | One `AbortController` for the whole request; the NDJSON reader only awaits `read()`. |
+| Bounded error payload | `checkOk` reads and parses the whole error body before any cap and logs on that path; a malformed stream line is `console.warn`ed and skipped. |
+| Retryable end of stream | Throws a bare `Error("Did not receive done or success response in stream.")`. |
+| Caller headers win | `Config.headers` is per client, not per request, and its `fetch` wrapper replaces caller `Content-Type`/`Accept`/`User-Agent` with `User-Agent: ollama-js/<version>`. |
+
+It also adds a `whatwg-fetch` runtime dependency with a side-effect import, and reads
+`process.env.OLLAMA_API_KEY` on its own for `ollama.com`, bypassing the credential Pi resolved.
+What it does not save is the actual adapter work: chunk-to-event translation, usage accounting and
+the transcript transform stay here either way.
+
+The full record — the rejected alternatives and the trigger that would reopen this decision — is
+ADR 0003 in the project's decision log.
+
 ## Known limits
 
 - Ollama returns tool calls without ids and matches tool results positionally, so Pi's ids are
