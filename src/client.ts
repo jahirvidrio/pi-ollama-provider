@@ -358,11 +358,6 @@ export class OllamaClient {
 		}
 	}
 
-	async version(signal?: AbortSignal): Promise<string> {
-		const payload = await this.json<{ version?: unknown }>("/version", { method: "GET" }, signal);
-		return typeof payload.version === "string" ? payload.version : "";
-	}
-
 	async listModels(signal?: AbortSignal): Promise<OllamaModelSummary[]> {
 		const payload = await this.json<{ models?: unknown }>("/tags", { method: "GET" }, signal);
 		if (!Array.isArray(payload.models)) {

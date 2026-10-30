@@ -51,8 +51,6 @@ export interface FakeOllamaOptions {
 	show?: object | FakeShowResponder;
 	/** First queued chat answer, equivalent to calling `respond()` right after startup. */
 	chat?: FakeOllamaReply;
-	/** Stall `GET /api/version`, the local login probe. */
-	stallVersion?: FakeStall;
 	/** Stall `GET /api/tags`, the catalog and cloud login probe. */
 	stallTags?: FakeStall;
 	/** Stall `POST /api/show` for the models named here, leaving the rest of the catalog intact. */
@@ -153,10 +151,6 @@ export async function startFakeOllama(options: FakeOllamaOptions = {}): Promise<
 			requests.push({ method: request.method ?? "GET", path, headers: request.headers, body });
 
 			if (request.method === "GET" && path === "/api/version") {
-				if (options.stallVersion) {
-					stall(response, options.stallVersion);
-					return;
-				}
 				writeJson(response, 200, { version: options.version ?? "0.12.6" });
 				return;
 			}

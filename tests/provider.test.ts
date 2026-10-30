@@ -114,23 +114,15 @@ function storedModel(baseUrl: string): Model<"ollama-chat"> {
 }
 
 describe("ollama provider auth", () => {
-	it("bounds the local login probe with the login deadline", async () => {
-		const server = await startFakeOllama({ stallVersion: "headers" });
-		try {
-			const provider = createOllamaProvider("local", { loginMs: 150 });
-			const login = provider.auth.apiKey?.login;
-			if (!login) throw new Error("the local provider is expected to have an interactive login");
+	it("reports the local provider as configured without an interactive login", async () => {
+		const provider = createOllamaProvider("local");
+		// The endpoint is configuration read at request time, so there is no host to collect and
+		// `/login ollama` must not be offered at all.
+		expect(provider.auth.apiKey?.login).toBeUndefined();
+		const result = await provider.auth.apiKey?.resolve({ ctx: authEnv(), signal: operationSignal() });
 
-			const error = await login(loginInteraction(server.origin)).catch((cause: unknown) => cause);
-
-			expect(error).toBeInstanceOf(OllamaError);
-			expect((error as OllamaError).kind).toBe("network");
-			expect((error as Error).message).toContain("/api/version");
-			expect((error as Error).message).toContain("timed out after 150ms");
-		} finally {
-			await server.stop();
-		}
-	}, 10_000);
+		expect(result?.auth).toEqual({ apiKey: "local", baseUrl: DEFAULT_OLLAMA_BASE_URL });
+	});
 
 	it("bounds the cloud login probe with the login deadline", async () => {
 		vi.stubGlobal("fetch", hangingFetch);
@@ -150,6 +142,30 @@ describe("ollama provider auth", () => {
 		}
 	}, 10_000);
 
+	it("stores no host when /login ollama-cloud verifies the key", async () => {
+		const server = await startFakeOllama({ tags: TAGS });
+		vi.stubEnv("OLLAMA_CLOUD_HOST", server.origin);
+		try {
+			const provider = createOllamaProvider("cloud");
+			const login = provider.auth.apiKey?.login;
+			if (!login) throw new Error("the cloud provider is expected to have an interactive login");
+
+			const credential = await login(loginInteraction("cloud-secret"));
+
+			// The endpoint comes from the environment, so the credential carries the key and nothing
+			// else: no host that can go stale.
+			expect(credential).toEqual({ type: "api_key", key: "cloud-secret" });
+			expect(credential.env).toBeUndefined();
+			// The probe proves the key against the endpoint the environment names.
+			expect(server.requests.filter((request) => request.path === "/api/tags")).toHaveLength(1);
+			const probe = server.requests.find((request) => request.path === "/api/tags");
+			expect(probe?.headers.authorization).toBe("Bearer cloud-secret");
+		} finally {
+			vi.unstubAllEnvs();
+			await server.stop();
+		}
+	});
+
 	it("resolves the local provider with zero configuration", async () => {
 		const provider = createOllamaProvider("local");
 		const result = await provider.auth.apiKey?.resolve({ ctx: authEnv(), signal: operationSignal() });
@@ -158,21 +174,22 @@ describe("ollama provider auth", () => {
 		expect(result?.env).toEqual({ OLLAMA_HOST: DEFAULT_OLLAMA_BASE_URL });
 	});
 
-	it("lets the stored credential's OLLAMA_HOST win over the ambient one", async () => {
+	it("ignores a host stored on the credential and reads OLLAMA_HOST instead", async () => {
 		const provider = createOllamaProvider("local");
 		const credential: ApiKeyCredential = {
 			type: "api_key",
 			key: "local",
+			// Written by an older `/login`: the endpoint is never a credential's business.
 			env: { OLLAMA_HOST: "http://from-credential:11434" },
 		};
 		const result = await provider.auth.apiKey?.resolve({
-			ctx: authEnv({ OLLAMA_HOST: "http://from-env:11434" }),
+			ctx: authEnv({ OLLAMA_HOST: "http://from-env:11434/" }),
 			credential,
 			signal: operationSignal(),
 		});
 
-		expect(result?.auth.baseUrl).toBe("http://from-credential:11434/api");
-		expect(result?.env).toEqual({ OLLAMA_HOST: "http://from-credential:11434/api" });
+		expect(result?.auth.baseUrl).toBe("http://from-env:11434/api");
+		expect(result?.env).toEqual({ OLLAMA_HOST: "http://from-env:11434/api" });
 	});
 
 	it("uses the ambient OLLAMA_HOST when the credential carries no host", async () => {
@@ -191,7 +208,32 @@ describe("ollama provider auth", () => {
 		const result = await provider.auth.apiKey?.resolve({ ctx: authEnv(), credential, signal: operationSignal() });
 
 		expect(result?.auth).toEqual({ apiKey: "cloud-secret", baseUrl: DEFAULT_OLLAMA_CLOUD_BASE_URL });
-		expect(result?.env).toEqual({ OLLAMA_HOST: DEFAULT_OLLAMA_CLOUD_BASE_URL });
+		expect(result?.env).toEqual({ OLLAMA_CLOUD_HOST: DEFAULT_OLLAMA_CLOUD_BASE_URL });
+	});
+
+	it("resolves the cloud endpoint from its own OLLAMA_CLOUD_HOST", async () => {
+		const provider = createOllamaProvider("cloud");
+		const credential: ApiKeyCredential = { type: "api_key", key: "cloud-secret" };
+		const result = await provider.auth.apiKey?.resolve({
+			ctx: authEnv({ OLLAMA_CLOUD_HOST: "https://proxy.example:8443/" }),
+			credential,
+			signal: operationSignal(),
+		});
+
+		expect(result?.auth).toEqual({ apiKey: "cloud-secret", baseUrl: "https://proxy.example:8443/api" });
+		expect(result?.env).toEqual({ OLLAMA_CLOUD_HOST: "https://proxy.example:8443/api" });
+	});
+
+	it("does not move the cloud endpoint with OLLAMA_HOST", async () => {
+		const provider = createOllamaProvider("cloud");
+		const credential: ApiKeyCredential = { type: "api_key", key: "cloud-secret" };
+		const result = await provider.auth.apiKey?.resolve({
+			ctx: authEnv({ OLLAMA_HOST: "http://from-env:11434" }),
+			credential,
+			signal: operationSignal(),
+		});
+
+		expect(result?.auth.baseUrl).toBe(DEFAULT_OLLAMA_CLOUD_BASE_URL);
 	});
 
 	it("uses the ambient OLLAMA_API_KEY when no cloud credential is stored", async () => {
@@ -217,10 +259,11 @@ describe("ollama provider catalog", () => {
 		const server = await startFakeOllama({ stallTags: "headers" });
 		const stored = storedModel(server.baseUrl);
 		try {
+			vi.stubEnv("OLLAMA_HOST", server.origin);
 			const provider = createOllamaProvider("local", { catalogMs: 150 });
 			const harness = refreshHarness({
 				allowNetwork: true,
-				credential: { type: "api_key", key: "local", env: { OLLAMA_HOST: server.origin } },
+				credential: { type: "api_key", key: "local" },
 				stored: [stored],
 			});
 
@@ -232,6 +275,7 @@ describe("ollama provider catalog", () => {
 			// The catalog is best-effort: no retry after the deadline (ADR 0004).
 			expect(server.requests.filter((request) => request.path === "/api/tags")).toHaveLength(1);
 		} finally {
+			vi.unstubAllEnvs();
 			await server.stop();
 		}
 	}, 10_000);
@@ -240,10 +284,11 @@ describe("ollama provider catalog", () => {
 		const server = await startFakeOllama({ stallTags: "body" });
 		const stored = storedModel(server.baseUrl);
 		try {
+			vi.stubEnv("OLLAMA_HOST", server.origin);
 			const provider = createOllamaProvider("local", { catalogMs: 150 });
 			const harness = refreshHarness({
 				allowNetwork: true,
-				credential: { type: "api_key", key: "local", env: { OLLAMA_HOST: server.origin } },
+				credential: { type: "api_key", key: "local" },
 				stored: [stored],
 			});
 
@@ -251,6 +296,7 @@ describe("ollama provider catalog", () => {
 
 			expect(provider.getModels()).toEqual([stored]);
 		} finally {
+			vi.unstubAllEnvs();
 			await server.stop();
 		}
 	}, 10_000);
@@ -258,10 +304,11 @@ describe("ollama provider catalog", () => {
 	it("publishes and persists the discovered catalog when network access is allowed", async () => {
 		const server = await startFakeOllama({ tags: TAGS, show: SHOW });
 		try {
+			vi.stubEnv("OLLAMA_HOST", server.origin);
 			const provider = createOllamaProvider("local");
 			const harness = refreshHarness({
 				allowNetwork: true,
-				credential: { type: "api_key", key: "local", env: { OLLAMA_HOST: server.origin } },
+				credential: { type: "api_key", key: "local" },
 			});
 
 			await provider.refreshModels?.(harness.context);
@@ -278,6 +325,7 @@ describe("ollama provider catalog", () => {
 			expect(persisted?.models.map((model) => model.id)).toEqual(DISCOVERED_IDS);
 			expect(persisted?.checkedAt).toBeTypeOf("number");
 		} finally {
+			vi.unstubAllEnvs();
 			await server.stop();
 		}
 	});

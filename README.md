@@ -8,8 +8,8 @@ Two independent providers are registered:
 
 | Provider | Endpoint | Authentication |
 | --- | --- | --- |
-| `ollama` | `http://localhost:11434/api` | none (local server) |
-| `ollama-cloud` | `https://ollama.com/api` | `OLLAMA_API_KEY` or a stored credential |
+| `ollama` | `OLLAMA_HOST`, `http://localhost:11434/` by default | none (local server) |
+| `ollama-cloud` | `OLLAMA_CLOUD_HOST`, `https://ollama.com/` by default | `OLLAMA_API_KEY` or a stored credential |
 
 ## Install
 
@@ -25,26 +25,35 @@ pi -e ./extensions/ollama/index.ts
 
 ## Configure
 
-Cloud needs a key. Either run `/login ollama-cloud` and paste it, or export it:
-
-```bash
-export OLLAMA_API_KEY=...
-```
+Each provider reads its endpoint from its own variable, at request time. Nothing about the
+endpoint is stored in `auth.json`.
 
 Local works with no configuration. Point it elsewhere with `OLLAMA_HOST`:
 
 ```bash
+# default: http://localhost:11434/
 export OLLAMA_HOST=http://192.168.1.10:11434
 ```
 
-A stored credential can carry the host as well, in `auth.json`:
+Cloud needs a key. Either run `/login ollama-cloud` and paste it, or export it:
+
+```bash
+# default: https://ollama.com/
+export OLLAMA_CLOUD_HOST=https://proxy.example.com/ollama
+export OLLAMA_API_KEY=...
+```
+
+`OLLAMA_CLOUD_HOST` is what a private deployment or a proxy in front of the hosted API needs; it
+does not move the local provider, and `OLLAMA_HOST` does not move cloud. Both variables accept an
+origin, an origin with a path, or an `/api` base URL, and the adapter normalizes them.
+
+The cloud key lives in `auth.json` only if you ran `/login ollama-cloud`; the endpoint never does:
 
 ```json
 {
   "ollama-cloud": {
     "type": "api_key",
-    "key": "...",
-    "env": { "OLLAMA_HOST": "https://ollama.com/api" }
+    "key": "..."
   }
 }
 ```

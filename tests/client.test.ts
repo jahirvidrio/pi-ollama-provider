@@ -18,8 +18,8 @@ describe("OllamaClient auth", () => {
 	it("sends a bearer key only when one is configured", async () => {
 		const server = await startFakeOllama();
 		try {
-			await new OllamaClient({ baseUrl: server.baseUrl, apiKey: "secret" }).version();
-			await new OllamaClient({ baseUrl: server.baseUrl }).version();
+			await new OllamaClient({ baseUrl: server.baseUrl, apiKey: "secret" }).listModels();
+			await new OllamaClient({ baseUrl: server.baseUrl }).listModels();
 
 			expect(server.requests[0]?.headers.authorization).toBe("Bearer secret");
 			expect(server.requests[1]?.headers.authorization).toBeUndefined();
@@ -30,16 +30,6 @@ describe("OllamaClient auth", () => {
 });
 
 describe("OllamaClient endpoints", () => {
-	it("reads the server version", async () => {
-		const server = await startFakeOllama({ version: "0.12.6" });
-		try {
-			expect(await new OllamaClient({ baseUrl: server.baseUrl }).version()).toBe("0.12.6");
-			expect(server.requests[0]?.path).toBe("/api/version");
-		} finally {
-			await server.stop();
-		}
-	});
-
 	it("lists models from /api/tags", async () => {
 		const server = await startFakeOllama({
 			tags: {

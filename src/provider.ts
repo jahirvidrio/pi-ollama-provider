@@ -7,141 +7,165 @@ import {
 	type ApiKeyAuth,
 	type ApiKeyCredential,
 	type AnyModel,
-	type AuthCheck,
 	type AuthContext,
 	type AuthResult,
-	type Credential,
-	createProvider,
 	type Model,
 	type Provider,
+	type ProviderAuthInteraction,
 	type RefreshModelsContext,
+	createProvider,
 } from "@earendil-works/pi-ai";
 import { loadCatalog } from "./catalog.ts";
 import { createClient, normalizeOllamaBaseUrl } from "./client.ts";
-import { OLLAMA_CHAT_API, streamOllamaChat } from "./stream.ts";
+import { OLLAMA_CHAT_API, type OllamaChatConfig, streamOllamaChat } from "./stream.ts";
 
 export const OLLAMA_PROVIDER_ID = "ollama";
 export const OLLAMA_CLOUD_PROVIDER_ID = "ollama-cloud";
+/** Canonical `/api` form of the `OLLAMA_HOST` default, `http://localhost:11434/`. */
 export const DEFAULT_OLLAMA_BASE_URL = "http://localhost:11434/api";
+/** Canonical `/api` form of the `OLLAMA_CLOUD_HOST` default, `https://ollama.com/`. */
 export const DEFAULT_OLLAMA_CLOUD_BASE_URL = "https://ollama.com/api";
 
-/** Where the chosen server URL is persisted, for both providers. */
+/** Ambient variable that names the local server. */
 const OLLAMA_HOST_ENV = "OLLAMA_HOST";
+/** Cloud has its own variable, so one environment cannot move both providers (ADR 0007). */
+const OLLAMA_CLOUD_HOST_ENV = "OLLAMA_CLOUD_HOST";
 /** Ambient fallback for the cloud key, so the key can stay out of `auth.json`. */
 const OLLAMA_API_KEY_ENV = "OLLAMA_API_KEY";
 
+/** The key a local server is resolved with: Ollama itself requires none. */
+const LOCAL_API_KEY = "local";
+/** Where a key came from, as Pi's auth status shows it. */
+const STORED_CREDENTIAL = "stored credential";
+
 export type OllamaProviderKind = "local" | "cloud";
 
-interface ProviderIdentity {
-	kind: OllamaProviderKind;
-	id: string;
-	name: string;
-	defaultBaseUrl: string;
-}
-
-const IDENTITIES: Record<OllamaProviderKind, ProviderIdentity> = {
-	local: {
-		kind: "local",
-		id: OLLAMA_PROVIDER_ID,
-		name: "Ollama",
-		defaultBaseUrl: DEFAULT_OLLAMA_BASE_URL,
-	},
-	cloud: {
-		kind: "cloud",
-		id: OLLAMA_CLOUD_PROVIDER_ID,
-		name: "Ollama Cloud",
-		defaultBaseUrl: DEFAULT_OLLAMA_CLOUD_BASE_URL,
-	},
-};
-
-/** `OLLAMA_HOST` stored on the credential by `/login`, normalized to an `/api` base URL. */
-function credentialHost(credential: Credential | undefined): string | undefined {
-	if (credential?.type !== "api_key") return undefined;
-	const host = credential.env?.[OLLAMA_HOST_ENV];
-	return typeof host === "string" && host.trim() ? normalizeOllamaBaseUrl(host) : undefined;
+/** A request key and the source Pi reports for it. */
+interface ResolvedKey {
+	key: string;
+	source: string;
 }
 
 /**
- * The server URL for one provider: the credential's stored host, then the ambient
- * `OLLAMA_HOST`, then the built-in default. Cloud always uses its fixed endpoint.
+ * One deployment flavor behind one interface: everything the two providers answer differently.
+ * The endpoint is not part of the contract beyond naming its variable, because the endpoint is
+ * configuration read at request time (ADR 0007); normalizing it is shared work in
+ * {@link baseUrlOf}, not something each profile reimplements.
  */
-async function resolveBaseUrl(
-	ctx: AuthContext,
-	credential: ApiKeyCredential | undefined,
-	identity: ProviderIdentity,
-): Promise<string> {
-	if (identity.kind === "cloud") return identity.defaultBaseUrl;
-	const ambient = (await ctx.env(OLLAMA_HOST_ENV))?.trim();
-	const configured = credentialHost(credential) ?? (ambient ? normalizeOllamaBaseUrl(ambient) : undefined);
-	return configured ?? identity.defaultBaseUrl;
+export interface ProviderProfile {
+	/** Read by the chat stream: only the local server allocates a context window. */
+	readonly kind: OllamaProviderKind;
+	/** Provider id Pi registers, e.g. `ollama-cloud`. */
+	readonly id: string;
+	readonly name: string;
+	/** Label of this provider's credential in Pi's auth UI. */
+	readonly authName: string;
+	/** Ambient variable that names this provider's endpoint. */
+	readonly hostEnv: string;
+	/** Endpoint used when {@link hostEnv} is unset or blank. */
+	readonly defaultBaseUrl: string;
+	/** The request key and where it came from; `undefined` when this provider is not configured. */
+	resolveKey(ctx: AuthContext, credential: ApiKeyCredential | undefined): Promise<ResolvedKey | undefined>;
+	/** Interactive setup, when this provider has a credential to collect. */
+	login?(interaction: ProviderAuthInteraction): Promise<ApiKeyCredential>;
 }
 
-/** Same resolution as {@link resolveBaseUrl} without an `AuthContext`; see `fetchModels`. */
-function refreshBaseUrl(context: RefreshModelsContext, identity: ProviderIdentity): string {
-	if (identity.kind === "cloud") return identity.defaultBaseUrl;
-	const configured = credentialHost(context.credential) ?? (context.baseUrl?.trim() || undefined);
-	return (configured ? normalizeOllamaBaseUrl(configured) : undefined) ?? identity.defaultBaseUrl;
+/**
+ * This profile's endpoint: the variable that names it, normalized to the canonical `/api` base,
+ * or the built-in default when the variable is unset or blank. Auth and the catalog call this same
+ * function, so they can never disagree about where the server is.
+ */
+function baseUrlOf(profile: ProviderProfile, ambientHost: string | undefined): string {
+	const named = ambientHost?.trim();
+	return named ? normalizeOllamaBaseUrl(named) : profile.defaultBaseUrl;
 }
 
-function apiKeyAuth(identity: ProviderIdentity, loginMs: number): ApiKeyAuth {
-	const local = identity.kind === "local";
-	return {
-		name: local ? "Ollama server" : "Ollama Cloud API key",
-		login: async (interaction): Promise<ApiKeyCredential> => {
-			if (!local) {
-				const key = (await interaction.prompt({ type: "secret", message: "Ollama Cloud API key" })).trim();
-				// Verifying against `/api/tags` proves the key before it is persisted.
-				await createClient(
-					identity.defaultBaseUrl,
-					{ apiKey: key || undefined },
-					{ timeoutMs: loginMs },
-				).listModels(interaction.signal);
-				return { type: "api_key", key: key || undefined, env: { [OLLAMA_HOST_ENV]: identity.defaultBaseUrl } };
-			}
-			const fallback = process.env[OLLAMA_HOST_ENV] ?? identity.defaultBaseUrl;
-			const entered = await interaction.prompt({
-				type: "text",
-				message: "Ollama server URL",
-				placeholder: fallback,
-			});
-			const baseUrl = normalizeOllamaBaseUrl(entered.trim() || fallback);
-			await createClient(baseUrl, undefined, { timeoutMs: loginMs }).version(interaction.signal);
-			return { type: "api_key", key: undefined, env: { [OLLAMA_HOST_ENV]: baseUrl } };
-		},
-		check: async ({ ctx, credential }): Promise<AuthCheck | undefined> => {
-			if (!local) {
-				if (await cloudKey(ctx, credential)) return { type: "api_key", source: "Ollama Cloud API key" };
-				return undefined;
-			}
-			// A local server needs no credential: a URL always resolves, so it is always configured.
-			return { type: "api_key", source: credentialHost(credential) ? "stored credential" : "local server" };
-		},
-		resolve: async ({ ctx, credential }): Promise<AuthResult | undefined> => {
-			const baseUrl = await resolveBaseUrl(ctx, credential, identity);
-			const env = { [OLLAMA_HOST_ENV]: baseUrl };
-			if (!local) {
-				const apiKey = await cloudKey(ctx, credential);
-				if (!apiKey) return undefined;
-				const source = credential?.key ? "stored credential" : OLLAMA_API_KEY_ENV;
-				return { auth: { apiKey, baseUrl }, env, source };
-			}
-			return {
-				auth: { apiKey: credential?.key || "local", baseUrl },
-				env,
-				source: credential?.key ? "stored credential" : "local server",
-			};
-		},
+/**
+ * The local server: no credential to collect and no key to send, and the endpoint comes from
+ * `OLLAMA_HOST`. A key stored by hand in `auth.json` is still honored, for a server behind a proxy.
+ */
+export class LocalProfile implements ProviderProfile {
+	readonly kind = "local";
+	readonly id = OLLAMA_PROVIDER_ID;
+	readonly name = "Ollama";
+	readonly authName = "Ollama server";
+	readonly hostEnv = OLLAMA_HOST_ENV;
+	readonly defaultBaseUrl = DEFAULT_OLLAMA_BASE_URL;
+
+	async resolveKey(
+		_ctx: AuthContext,
+		credential: ApiKeyCredential | undefined,
+	): Promise<ResolvedKey> {
+		const stored = credential?.key?.trim();
+		return stored
+			? { key: stored, source: STORED_CREDENTIAL }
+			: { key: LOCAL_API_KEY, source: "local server" };
+	}
+}
+
+/**
+ * The hosted server: the key is the credential, and the endpoint comes from `OLLAMA_CLOUD_HOST`,
+ * so a private deployment or a proxy needs no code change and no second variable.
+ */
+export class CloudProfile implements ProviderProfile {
+	readonly kind = "cloud";
+	readonly id = OLLAMA_CLOUD_PROVIDER_ID;
+	readonly name = "Ollama Cloud";
+	readonly authName = "Ollama Cloud API key";
+	readonly hostEnv = OLLAMA_CLOUD_HOST_ENV;
+	readonly defaultBaseUrl = DEFAULT_OLLAMA_CLOUD_BASE_URL;
+
+	constructor(private readonly loginMs: number) {}
+
+	async resolveKey(
+		ctx: AuthContext,
+		credential: ApiKeyCredential | undefined,
+	): Promise<ResolvedKey | undefined> {
+		const stored = credential?.key?.trim();
+		if (stored) return { key: stored, source: STORED_CREDENTIAL };
+		const ambient = (await ctx.env(OLLAMA_API_KEY_ENV))?.trim();
+		return ambient ? { key: ambient, source: OLLAMA_API_KEY_ENV } : undefined;
+	}
+
+	/** Verifying against `/api/tags` proves the key against the configured endpoint. */
+	readonly login = async (interaction: ProviderAuthInteraction): Promise<ApiKeyCredential> => {
+		const key = (await interaction.prompt({ type: "secret", message: "Ollama Cloud API key" })).trim();
+		await createClient(
+			baseUrlOf(this, process.env[this.hostEnv]),
+			{ apiKey: key || undefined },
+			{ timeoutMs: this.loginMs },
+		).listModels(interaction.signal);
+		// The key and nothing else: the endpoint stays whatever the environment names (ADR 0007).
+		return { type: "api_key", key: key || undefined };
 	};
 }
 
-async function cloudKey(
-	ctx: AuthContext,
-	credential: ApiKeyCredential | undefined,
-): Promise<string | undefined> {
-	const stored = credential?.key?.trim();
-	if (stored) return stored;
-	const ambient = (await ctx.env(OLLAMA_API_KEY_ENV))?.trim();
-	return ambient ? ambient : undefined;
+/** The two profiles, by kind: a third deployment is one class above and one entry here. */
+const PROFILES: Record<OllamaProviderKind, new (loginMs: number) => ProviderProfile> = {
+	local: LocalProfile,
+	cloud: CloudProfile,
+};
+
+/**
+ * One provider's `apiKey` auth. `check` is deliberately absent: resolving is cheap and free of side
+ * effects, and Pi derives the same status from `resolve()` when no check is declared.
+ */
+function apiKeyAuth(profile: ProviderProfile): ApiKeyAuth {
+	const login = profile.login;
+	return {
+		name: profile.authName,
+		...(login !== undefined && { login }),
+		resolve: async ({ ctx, credential }): Promise<AuthResult | undefined> => {
+			const resolved = await profile.resolveKey(ctx, credential);
+			if (!resolved) return undefined;
+			const baseUrl = baseUrlOf(profile, await ctx.env(profile.hostEnv));
+			return {
+				auth: { apiKey: resolved.key, baseUrl },
+				env: { [profile.hostEnv]: baseUrl },
+				source: resolved.source,
+			};
+		},
+	};
 }
 
 /** Chat models of this provider that this adapter can serve, restored from disk. */
@@ -150,18 +174,18 @@ function isOwnChatModel(model: AnyModel, providerId: string): model is Model<"ol
 }
 
 /**
- * Deadline for one request of a catalog refresh, not for the refresh as a whole: `/api/tags` gets
- * this budget and every `/api/show` gets it again, so a refresh of N models whose requests all
- * stall can spend up to `CATALOG_TIMEOUT_MS` × (1 + ⌈N/4⌉), because the fan-out runs four at a
- * time. A server that accepts the connection and never answers is not an exception, so without a
- * deadline the stored-catalog fallback in `loadCatalog` would never fire and the provider would
- * stay without models. A stalled request costs its model its metadata; a stalled `/api/tags` costs
- * this refresh its network path, and the provider serves the stored list while the next refresh
- * retries by itself: the catalog is best-effort and never retried inside one refresh (ADR 0004).
+ * Deadline for one catalog request, not for the refresh as a whole: `/api/tags` gets this budget
+ * and every `/api/show` gets it again, so a refresh of N models whose requests all stall can spend
+ * up to `CATALOG_TIMEOUT_MS` × (1 + ⌈N/4⌉), because the fan-out runs four at a time. A server that
+ * accepts the connection and never answers is a hang, not an exception: without a deadline the
+ * stored-catalog fallback in `loadCatalog` would never fire and the provider would stay without
+ * models. A stalled request costs its model its metadata, a stalled `/api/tags` costs this refresh
+ * its network path, and the next refresh retries by itself: the catalog is best-effort and never
+ * retried inside one refresh (ADR 0004).
  */
 export const CATALOG_TIMEOUT_MS = 30_000;
 
-/** Budget for the login probe: a server that cannot verify inside it is not usable right now. */
+/** Budget for the cloud login probe: a server that cannot verify inside it is not usable now. */
 export const LOGIN_TIMEOUT_MS = 15_000;
 
 /**
@@ -175,29 +199,59 @@ export interface OllamaProviderTimeouts {
 	 * {@link CATALOG_TIMEOUT_MS}. It is not a budget for the refresh as a whole: see the constant.
 	 */
 	catalogMs?: number;
-	/** One login probe (`/api/version` or `/api/tags`); defaults to {@link LOGIN_TIMEOUT_MS}. */
+	/** The cloud login probe (`/api/tags`); defaults to {@link LOGIN_TIMEOUT_MS}. */
 	loginMs?: number;
 }
 
 /**
- * Builds one of the two Ollama providers. `createProvider` owns the transactional catalog
- * contract: it restores `context.stored` before any network access and persists whatever
- * `fetchModels` returns with `checkedAt`, so this factory only has to produce the list.
+ * Builds this provider's catalog. `createProvider` owns the transactional contract: it restores
+ * `context.stored` before any network access and persists whatever this returns with `checkedAt`,
+ * so this function only has to produce the list.
+ */
+async function fetchModels(
+	profile: ProviderProfile,
+	context: RefreshModelsContext,
+	catalogMs: number,
+): Promise<Model<"ollama-chat">[]> {
+	const restored = (context.stored?.models ?? []).filter((model) => isOwnChatModel(model, profile.id));
+	const credential = context.credential;
+	if (!context.allowNetwork || context.signal.aborted || credential?.type !== "api_key") {
+		return restored;
+	}
+	// This context has no env accessor, so the endpoint comes from `process.env` directly; the auth
+	// path reads the same variable through `AuthContext` (ADR 0007).
+	const client = createClient(
+		baseUrlOf(profile, process.env[profile.hostEnv]),
+		{ apiKey: credential.key },
+		{ timeoutMs: catalogMs },
+	);
+	// `loadCatalog` returns the stored catalog unchanged when `/api/tags` fails, and the deadline
+	// turns a server that never answers into exactly that failure instead of a hang.
+	return loadCatalog({
+		client,
+		providerId: profile.id,
+		allowNetwork: true,
+		stored: restored,
+		signal: context.signal,
+	});
+}
+
+/**
+ * Builds one of the two Ollama providers from its profile.
  */
 export function createOllamaProvider(
 	kind: OllamaProviderKind,
 	timeouts: OllamaProviderTimeouts = {},
 ): Provider<"ollama-chat"> {
-	const identity = IDENTITIES[kind];
-	const config = { kind: identity.kind };
+	const profile = new PROFILES[kind](timeouts.loginMs ?? LOGIN_TIMEOUT_MS);
 	const catalogMs = timeouts.catalogMs ?? CATALOG_TIMEOUT_MS;
-	const loginMs = timeouts.loginMs ?? LOGIN_TIMEOUT_MS;
+	const config: OllamaChatConfig = { kind: profile.kind };
 
 	return createProvider<"ollama-chat">({
-		id: identity.id,
-		name: identity.name,
-		baseUrl: identity.defaultBaseUrl,
-		auth: { apiKey: apiKeyAuth(identity, loginMs) },
+		id: profile.id,
+		name: profile.name,
+		baseUrl: profile.defaultBaseUrl,
+		auth: { apiKey: apiKeyAuth(profile) },
 		// Purely dynamic: the catalog comes from the server, never from a static list.
 		models: [],
 		api: {
@@ -208,25 +262,6 @@ export function createOllamaProvider(
 					streamOllamaChat(model as Model<"ollama-chat">, context, options, config),
 			},
 		},
-		fetchModels: async (context) => {
-			const restored = (context.stored?.models ?? []).filter((model) => isOwnChatModel(model, identity.id));
-			if (!context.allowNetwork || context.signal.aborted || context.credential?.type !== "api_key") {
-				return restored;
-			}
-			const client = createClient(
-				refreshBaseUrl(context, identity),
-				{ apiKey: context.credential.key },
-				{ timeoutMs: catalogMs },
-			);
-			// `loadCatalog` returns the stored catalog unchanged when `/api/tags` fails, and the
-			// deadline turns a server that never answers into exactly that failure instead of a hang.
-			return loadCatalog({
-				client,
-				providerId: identity.id,
-				allowNetwork: true,
-				stored: restored,
-				signal: context.signal,
-			});
-		},
+		fetchModels: (context) => fetchModels(profile, context, catalogMs),
 	});
 }
