@@ -10,7 +10,7 @@ import type {
   Tool,
   ToolCall,
 } from '@earendil-works/pi-ai';
-import type { OllamaChatMessage, OllamaToolCall, OllamaToolDefinition } from './wire.ts';
+import type { OllamaChatMessage, OllamaToolCall, OllamaToolDefinition } from '../wire.ts';
 
 function textOf (blocks: readonly (TextContent | ImageContent)[]): string {
   return blocks

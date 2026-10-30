@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { OllamaClient } from '../src/client.ts';
+import { OllamaClient } from '../src/client/index.ts';
 import { startFakeOllama } from './helpers/fake-ollama.ts';
 
 const REQUEST = { model: 'gemma4:31b', messages: [{ role: 'user' as const, content: 'hi' }] };

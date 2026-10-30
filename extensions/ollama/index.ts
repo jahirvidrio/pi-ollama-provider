@@ -1,5 +1,5 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { createOllamaProvider } from "../../src/provider.ts";
+import { createOllamaProvider } from "../../src/provider/index.ts";
 
 /**
  * Registers the two independent providers: `ollama` for a local server and

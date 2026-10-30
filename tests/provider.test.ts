@@ -10,7 +10,7 @@ import {
   type RefreshModelsContext,
 } from '@earendil-works/pi-ai';
 import { OllamaError } from '../src/errors.ts';
-import { DEFAULT_OLLAMA_BASE_URL, DEFAULT_OLLAMA_CLOUD_BASE_URL, createOllamaProvider } from '../src/provider.ts';
+import { DEFAULT_OLLAMA_BASE_URL, DEFAULT_OLLAMA_CLOUD_BASE_URL, createOllamaProvider } from '../src/provider/index.ts';
 import { startFakeOllama } from './helpers/fake-ollama.ts';
 
 const TAGS = {

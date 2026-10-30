@@ -1,7 +1,7 @@
 /** HTTP client for the native Ollama API (`/api/*`): endpoints, deadlines, retries and the chat stream. */
 
-import { retryProviderRequest } from '../vendor/pi-ai/utils/provider-retry.js';
-import { capErrorBody, OllamaError, providerMessage } from './errors.ts';
+import { retryProviderRequest } from '../../vendor/pi-ai/utils/provider-retry.js';
+import { capErrorBody, OllamaError, providerMessage } from '../errors.ts';
 import { readLines } from './ndjson.ts';
 import {
   type OllamaChatChunk,
@@ -9,7 +9,7 @@ import {
   type OllamaModelSummary,
   type OllamaShowResponse,
   normalizeOllamaBaseUrl,
-} from './wire.ts';
+} from '../wire.ts';
 
 function isAbort (error: unknown, signal: AbortSignal | undefined): boolean {
   if (signal?.aborted) return true;

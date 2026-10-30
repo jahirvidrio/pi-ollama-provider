@@ -4,9 +4,9 @@ import {
   type Model,
   normalizeContext,
 } from '@earendil-works/pi-ai';
-import { OllamaClient } from '../src/client.ts';
+import { OllamaClient } from '../src/client/index.ts';
 import { OllamaError } from '../src/errors.ts';
-import { streamOllamaChat } from '../src/stream.ts';
+import { streamOllamaChat } from '../src/chat/index.ts';
 import { startFakeOllama } from './helpers/fake-ollama.ts';
 
 const REQUEST = { model: 'gemma4:31b', messages: [{ role: 'user' as const, content: 'hi' }] };

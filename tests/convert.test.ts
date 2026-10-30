@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { AssistantMessage, Message, Tool, ToolResultMessage, UserMessage, Usage } from '@earendil-works/pi-ai';
-import { buildOllamaMessages, ollamaToolCallToPi, toOllamaTools } from '../src/convert.ts';
+import { buildOllamaMessages, ollamaToolCallToPi, toOllamaTools } from '../src/chat/convert.ts';
 
 const ZERO_USAGE: Usage = {
   input: 0,
