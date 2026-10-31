@@ -11,7 +11,8 @@ import {
   isRetryableAssistantError,
   normalizeContext,
 } from '@earendil-works/pi-ai';
-import { streamOllamaChat, type OllamaStreamOptions } from '../src/chat/index.ts';
+import { streamOllamaChat } from '../src/chat/index.ts';
+import type { OllamaStreamOptions } from '../src/chat/options.ts';
 import { startFakeOllama } from './helpers/fake-ollama.ts';
 
 const ZERO_COST = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };

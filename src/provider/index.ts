@@ -15,7 +15,8 @@ import {
   type RefreshModelsContext,
 } from '@earendil-works/pi-ai';
 import { loadCatalog } from '../catalog/index.ts';
-import { OLLAMA_CHAT_API, type OllamaChatConfig, streamOllamaChat } from '../chat/index.ts';
+import { OLLAMA_CHAT_API, streamOllamaChat } from '../chat/index.ts';
+import type { OllamaChatConfig } from '../chat/options.ts';
 import { createClient } from '../client/index.ts';
 import { CloudProfile } from './cloud.ts';
 import { LocalProfile } from './local.ts';
