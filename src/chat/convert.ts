@@ -58,7 +58,9 @@ export function buildOllamaMessages (input: {
           text = textOf(message.content);
           images = imagesOf(message.content);
         }
-        converted.push({ role: 'user', content: text, ...(images.length > 0 && { images }) });
+        const userMessage: OllamaChatMessage = { role: 'user', content: text };
+        if (images.length > 0) userMessage.images = images;
+        converted.push(userMessage);
         break;
       }
       case 'assistant': {
@@ -85,24 +87,21 @@ export function buildOllamaMessages (input: {
 }
 
 function toAssistantMessage (message: AssistantMessage): OllamaChatMessage {
-  const text = message.content
-    .filter((block): block is TextContent => block.type === 'text')
-    .map((block) => block.text)
-    .join('');
-  const thinking = message.content
-    .filter((block) => block.type === 'thinking')
-    .map((block) => block.thinking)
-    .join('');
-  const toolCalls = message.content
-    .filter((block): block is ToolCall => block.type === 'toolCall')
-    .map((call) => ({ function: { name: call.name, arguments: call.arguments } }));
+  const text: string[] = [];
+  const thinking: string[] = [];
+  const toolCalls: OllamaToolCall[] = [];
+  for (const block of message.content) {
+    if (block.type === 'text') text.push(block.text);
+    else if (block.type === 'thinking') thinking.push(block.thinking);
+    else if (block.type === 'toolCall') {
+      toolCalls.push({ function: { name: block.name, arguments: block.arguments } });
+    }
+  }
 
-  return {
-    role: 'assistant',
-    content: text,
-    ...(thinking.length > 0 && { thinking }),
-    ...(toolCalls.length > 0 && { tool_calls: toolCalls }),
-  };
+  const converted: OllamaChatMessage = { role: 'assistant', content: text.join('') };
+  if (thinking.length > 0) converted.thinking = thinking.join('');
+  if (toolCalls.length > 0) converted.tool_calls = toolCalls;
+  return converted;
 }
 
 /** Ollama declares tools as JSON Schema functions. */

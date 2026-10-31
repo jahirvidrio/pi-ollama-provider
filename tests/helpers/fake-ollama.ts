@@ -65,6 +65,8 @@ export interface FakeOllama {
   requests: RecordedRequest[];
   /** Queue the next `POST /api/chat` answer. */
   respond(reply: FakeOllamaReply): void;
+  /** Resolves once the server saw request `index` close its connection. */
+  closed(index?: number): Promise<void>;
   stop(): Promise<void>;
 }
 
@@ -136,11 +138,19 @@ export async function startFakeOllama (options: FakeOllamaOptions = {}): Promise
   const replies: FakeOllamaReply[] = options.chat ? [options.chat] : [];
   const requests: RecordedRequest[] = [];
   const inFlight = new Set<AbortController>();
+  const closedByRequest: Promise<void>[] = [];
 
   const server = createServer((request, response) => {
     const controller = new AbortController();
     inFlight.add(controller);
+    let markClosed: () => void = () => undefined;
+    closedByRequest.push(
+      new Promise<void>((resolve) => {
+        markClosed = resolve;
+      })
+    );
     response.on('close', () => {
+      markClosed();
       controller.abort();
       inFlight.delete(controller);
     });
@@ -211,6 +221,7 @@ export async function startFakeOllama (options: FakeOllamaOptions = {}): Promise
     respond: (reply) => {
       replies.push(reply);
     },
+    closed: (index = 0) => closedByRequest[index] ?? Promise.resolve(),
     stop: async () => {
       for (const controller of inFlight) controller.abort();
       inFlight.clear();

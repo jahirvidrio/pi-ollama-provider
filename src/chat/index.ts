@@ -9,13 +9,10 @@ import {
 } from '@earendil-works/pi-ai';
 import { createClient } from '../client/index.ts';
 import { OllamaError } from '../errors.ts';
-import type { OllamaChatChunk, OllamaChatRequest } from '../wire.ts';
+import { OLLAMA_CHAT_API, type OllamaChatChunk, type OllamaChatRequest } from '../wire.ts';
 import type { OllamaChatConfig, OllamaStreamOptions } from './options.ts';
 import { buildChatRequest } from './request.ts';
 import { TurnWriter } from './writer.ts';
-
-/** The custom API id this adapter implements, used by the registered providers. */
-export const OLLAMA_CHAT_API = 'ollama-chat';
 
 function createAssistantMessage (model: Model<'ollama-chat'>): AssistantMessage {
   return {

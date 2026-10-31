@@ -320,6 +320,29 @@ describe('caller cancellation', () => {
     expect((error as OllamaError).kind).toBe('protocol');
     expect(getEventListeners(controller.signal, 'abort')).toEqual([]);
   });
+
+  it('releases the socket when the consumer stops at the done chunk', async () => {
+    const server = await startFakeOllama({
+      chat: {
+        chunks: [
+          { message: { role: 'assistant', content: 'ok' }, done: true, done_reason: 'stop' },
+          { message: { role: 'assistant', content: 'late' }, done: false },
+        ],
+        keepOpen: true,
+      },
+    });
+    try {
+      for await (const chunk of new OllamaClient({ baseUrl: server.baseUrl }).chat(REQUEST)) {
+        if (chunk.done) break;
+      }
+
+      // The line scanner owns the reader, so breaking on the final chunk must cancel the stream:
+      // the server sees the connection close instead of holding it until it times out.
+      await server.closed(0);
+    } finally {
+      await server.stop();
+    }
+  }, 10_000);
 });
 
 describe('error bodies', () => {

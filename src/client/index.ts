@@ -19,7 +19,6 @@ import { requestJson } from './json.ts';
 import { readLines } from './ndjson.ts';
 import { DEFAULT_MAX_RETRIES, type OllamaClientOptions, type OllamaResponseInfo } from './options.ts';
 
-/** Headers of an HTTP response as a plain record, for `onResponse`. */
 function responseHeaders (headers: Headers): Record<string, string> {
   const record: Record<string, string> = {};
   headers.forEach((value, key) => {
@@ -187,7 +186,6 @@ export interface OllamaCredential {
   apiKey?: string;
 }
 
-/** Every client option `createClient` does not take positionally. */
 export type OllamaClientOverrides = Omit<OllamaClientOptions, 'baseUrl' | 'apiKey'>;
 
 /**

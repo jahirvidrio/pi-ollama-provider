@@ -15,9 +15,10 @@ import {
   type RefreshModelsContext,
 } from '@earendil-works/pi-ai';
 import { loadCatalog } from '../catalog/index.ts';
-import { OLLAMA_CHAT_API, streamOllamaChat } from '../chat/index.ts';
+import { streamOllamaChat } from '../chat/index.ts';
 import type { OllamaChatConfig } from '../chat/options.ts';
 import { createClient } from '../client/index.ts';
+import { OLLAMA_CHAT_API } from '../wire.ts';
 import { CloudProfile } from './cloud.ts';
 import { LocalProfile } from './local.ts';
 import { baseUrlOf, type OllamaProviderKind, type ProviderProfile } from './profile.ts';
@@ -27,7 +28,6 @@ import {
   type OllamaProviderTimeouts,
 } from './timeouts.ts';
 
-/** The two profiles, by kind: a third deployment is one class above and one entry here. */
 const PROFILES: Record<OllamaProviderKind, new (loginMs: number) => ProviderProfile> = {
   local: LocalProfile,
   cloud: CloudProfile,
@@ -38,10 +38,8 @@ const PROFILES: Record<OllamaProviderKind, new (loginMs: number) => ProviderProf
  * effects, and Pi derives the same status from `resolve()` when no check is declared.
  */
 function apiKeyAuth (profile: ProviderProfile): ApiKeyAuth {
-  const login = profile.login;
-  return {
+  const auth: ApiKeyAuth = {
     name: profile.authName,
-    ...(login !== undefined && { login }),
     resolve: async ({ ctx, credential }): Promise<AuthResult | undefined> => {
       const resolved = await profile.resolveKey(ctx, credential);
       if (!resolved) return undefined;
@@ -53,6 +51,8 @@ function apiKeyAuth (profile: ProviderProfile): ApiKeyAuth {
       };
     },
   };
+  if (profile.login) auth.login = profile.login;
+  return auth;
 }
 
 /** Chat models of this provider that this adapter can serve, restored from disk. */

@@ -1,5 +1,3 @@
-/** The local server: no credential to collect and no key to send. */
-
 import type { ApiKeyCredential, AuthContext } from '@earendil-works/pi-ai';
 import {
   DEFAULT_OLLAMA_BASE_URL,

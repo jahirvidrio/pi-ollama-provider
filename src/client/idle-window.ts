@@ -4,13 +4,12 @@ import { OllamaError } from '../errors.ts';
 
 /**
  * Status that marks an idle timeout. It is a provider-shaped error so Pi's retry policy sees
- * it, but `chat` lists it in `noRetryStatuses`: the wait is already bounded by `timeoutMs`, and
- * retrying would turn a five minute stall into fifteen. A server that genuinely answers 408 is
- * therefore not retried either; Ollama does not send one.
+ * it, but the chat establishment lists it in `noRetryStatuses`: the wait is already bounded by
+ * `timeoutMs`, and retrying would turn a five minute stall into fifteen. A server that genuinely
+ * answers 408 is therefore not retried either; Ollama does not send one.
  */
 export const IDLE_TIMEOUT_STATUS = 408;
 
-/** The error that closes one idle window; see {@link IDLE_TIMEOUT_STATUS}. */
 export function idleTimeoutError (timeoutMs: number | undefined): OllamaError {
   return new OllamaError('network', `Ollama stream timed out after ${timeoutMs}ms without data`, IDLE_TIMEOUT_STATUS);
 }

@@ -36,7 +36,6 @@ export function httpError (response: Response, description: string): OllamaError
   return new OllamaError('http', `${response.status}: ${detail}`, response.status, response.headers);
 }
 
-/** The text of a thrown value, for the messages that carry it. */
 export function messageOf (error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }

@@ -1,8 +1,7 @@
 /** One `/api/tags` summary plus its `/api/show` metadata translated into a Pi model. */
 
 import type { Model, ModelInputModality } from '@earendil-works/pi-ai';
-import { OLLAMA_CHAT_API } from '../chat/index.ts';
-import type { OllamaModelSummary, OllamaShowResponse } from '../wire.ts';
+import { OLLAMA_CHAT_API, type OllamaModelSummary, type OllamaShowResponse } from '../wire.ts';
 import { thinkingLevelMapOf } from './thinking.ts';
 
 /**
@@ -64,7 +63,7 @@ export function toChatModel (input: ToChatModelInput): Model<'ollama-chat'> {
   const modalities: ModelInputModality[] = ['text'];
   if (capabilities.has('vision')) modalities.push('image');
 
-  return {
+  const model: Model<'ollama-chat'> = {
     id,
     name: id,
     api: OLLAMA_CHAT_API,
@@ -75,6 +74,7 @@ export function toChatModel (input: ToChatModelInput): Model<'ollama-chat'> {
     cost: { ...ZERO_COST },
     contextWindow,
     maxTokens: contextWindow,
-    ...(thinkingLevelMap !== undefined && { thinkingLevelMap }),
   };
+  if (thinkingLevelMap !== undefined) model.thinkingLevelMap = thinkingLevelMap;
+  return model;
 }

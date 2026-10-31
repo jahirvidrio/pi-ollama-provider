@@ -55,7 +55,7 @@ export function buildChatRequest (
   // text-only model receives `images` it rejects.
   const messages = transformMessages([...context.messages], model);
 
-  return {
+  const request: OllamaChatRequest = {
     model: model.id,
     messages: buildOllamaMessages({
       systemPrompt: getCurrentSystemPrompt(messages),
@@ -64,8 +64,9 @@ export function buildChatRequest (
       // prompt twice.
       messages: messages.filter((message) => message.role !== 'system'),
     }),
-    ...(think !== undefined && { think }),
-    ...(Object.keys(chatOptions).length > 0 && { options: chatOptions }),
-    ...(tools !== undefined && { tools }),
   };
+  if (think !== undefined) request.think = think;
+  if (Object.keys(chatOptions).length > 0) request.options = chatOptions;
+  if (tools !== undefined) request.tools = tools;
+  return request;
 }

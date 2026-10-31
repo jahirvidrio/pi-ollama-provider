@@ -2,7 +2,6 @@
 
 import { OllamaError } from '../errors.ts';
 
-/** Whether a failure came from an abort: the caller's signal already fired, or the error says so. */
 export function isAbort (error: unknown, signal: AbortSignal | undefined): boolean {
   if (signal?.aborted) return true;
   return error instanceof Error && error.name === 'AbortError';

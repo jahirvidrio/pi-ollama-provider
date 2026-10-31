@@ -1,5 +1,8 @@
 /** Wire types for Ollama's native API (`/api/*`) and the canonical form of its endpoint. */
 
+/** The custom API id this adapter implements, used by the registered providers. */
+export const OLLAMA_CHAT_API = 'ollama-chat';
+
 export interface OllamaModelSummary {
   name: string;
   model: string;

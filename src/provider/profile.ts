@@ -27,7 +27,6 @@ export const STORED_CREDENTIAL = 'stored credential';
 
 export type OllamaProviderKind = 'local' | 'cloud';
 
-/** A request key and the source Pi reports for it. */
 export interface ResolvedKey {
   key: string;
   source: string;
