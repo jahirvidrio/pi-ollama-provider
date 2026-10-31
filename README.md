@@ -1,21 +1,9 @@
 # pi-ollama-provider
 
-Native [Pi](https://pi.dev) provider for Ollama: local models and Ollama Cloud, speaking
-Ollama's own API (`/api/chat`, `/api/tags`, `/api/show`). No OpenAI-compatible shim, no
-third-party gateway, no SDK.
+Ollama inside [Pi](https://pi.dev): the models on your own machine and the models on Ollama Cloud.
+It talks to Ollama directly, using Ollama's own API.
 
-Two independent providers are registered:
-
-| Provider | Endpoint | Authentication |
-| --- | --- | --- |
-| `ollama` | `OLLAMA_HOST`, `http://localhost:11434/` by default | none (local server) |
-| `ollama-cloud` | `OLLAMA_CLOUD_HOST`, `https://ollama.com/` by default | `OLLAMA_API_KEY` or a stored credential |
-
-Status: `0.1.0`, beta — what ships here is the Pi provider contract, which can still move. The
-cloud path is verified live (catalog discovery, text, thinking levels and a tool call), while the
-local path is covered by the contract tests against a fake server. Built and tested against
-`@earendil-works/pi-ai` 1.4.0; the copies under `vendor/` are checked against the installed package
-by `npm run vendor:check`.
+Beta, `0.1.0`.
 
 ## Install
 
@@ -23,171 +11,86 @@ by `npm run vendor:check`.
 pi install npm:pi-ollama-provider
 ```
 
-From a checkout, without installing:
+Restart Pi. Nothing else to set up.
 
-```bash
-pi -e ./extensions/ollama/index.ts
+## Initialize
+
+**Local models.** Have [Ollama](https://ollama.com/download) running on this machine. Pi finds it at
+`http://localhost:11434` and needs no configuration.
+
+**Ollama Cloud.** Create a key at [ollama.com/settings/keys](https://ollama.com/settings/keys), then
+run this in Pi and paste it:
+
+```
+/login ollama-cloud
 ```
 
-## Configure
+The key is saved in Pi's credential file (`auth.json`), so this is a one-time step.
 
-Nothing about an endpoint is ever stored in `auth.json`: each provider reads its own variable at
-request time, on every call.
+**Choose a model.** Start Pi and run `/model`. Pi asks the server which models are available and
+lists them, with the context window and reasoning levels each one really has.
 
-### Ollama Cloud
+> Run that once interactively. Non-interactive runs (`pi -p "..."`) read the list Pi already saved
+> instead of asking the server again.
 
-Cloud needs a key. The recommended path is `/login ollama-cloud` inside Pi, which verifies the key
-against the server before storing it; create one at
-[ollama.com/settings/keys](https://ollama.com/settings/keys).
+## Settings
 
-When the key should not live on disk, export it instead — it is read on every request, which is what
-CI and other managed environments need:
+Everything here is optional. The defaults work.
 
-```bash
-export OLLAMA_API_KEY=...
-```
+### Environment variables
 
-The key goes to `https://ollama.com/` by default. A private deployment or a proxy in front of the
-hosted API is one variable:
+| Variable | Default | What it changes |
+| --- | --- | --- |
+| `OLLAMA_HOST` | `http://localhost:11434` | Where the local server is, when it is not on this machine. |
+| `OLLAMA_CLOUD_HOST` | `https://ollama.com` | Where cloud requests go: a proxy or a private deployment. |
+| `OLLAMA_API_KEY` | — | The cloud key, for when it must not live on disk (CI, a shared machine). |
 
-```bash
-export OLLAMA_CLOUD_HOST=https://proxy.example.com/ollama
-```
+Each variable belongs to its own provider: `OLLAMA_HOST` never moves cloud, and `OLLAMA_CLOUD_HOST`
+never moves local. Both accept an address with or without `/api`. The endpoint is read on every
+request and never written to disk, so changing the variable takes effect immediately.
 
-Point that variable only at a server you trust: the key travels with it.
+### Pi settings
 
-### Ollama (local)
+In Pi's `settings.json`, in the agent directory:
 
-Local works with no configuration. It takes its host from `OLLAMA_HOST`, so pointing it at another
-machine is one variable:
+| Setting | Default | What it changes |
+| --- | --- | --- |
+| `retry.provider.timeoutMs` | 300 s | How long a response may go quiet before the request is abandoned. |
+| `retry.provider.maxRetryDelayMs` | `60000` | The longest wait honored when a server asks to retry later; `0` removes the limit. |
 
-```bash
-export OLLAMA_HOST=http://192.168.1.10:11434
-```
+A server that asks to wait longer than `maxRetryDelayMs` gets its error reported right away, with
+the delay it asked for appended — `(the server asked to retry after 90s)` — and Pi retries on its
+own instead of holding your turn.
 
-The two variables are independent: `OLLAMA_HOST` does not move cloud, and `OLLAMA_CLOUD_HOST` does
-not move the local provider. Both accept an origin, an origin with a path, or an `/api` base URL,
-and the adapter normalizes them. Nothing about the endpoint is persisted either, so a host stored
-by an older `/login ollama` is simply not consulted.
+### Context window
 
-## Use the catalog
+Pi uses the context window Ollama reports for each model, and a local request asks the server to
+allocate exactly that much. That is why a model with a very large window can be slow or fail to
+load: the number is memory, not only a limit. If it happens, choose a model with a smaller window.
+Cloud requests do not send it; the hosted service manages its own.
 
-Models are discovered from the server, never hard-coded. `/api/tags` lists them and
-`/api/show` supplies the real `context_length` and the model's own `thinking.values`, so Pi
-reports the true context window and offers only the reasoning levels the model accepts.
+## Appendix: why this does not use `ollama-js`
 
-> **Limitation in Pi 1.4.0:** non-interactive modes do not refresh dynamic providers.
-> `--list-models`, `auth check`, `--print`, `--mode rpc` and `pi update --models` either never
-> call the provider's refresh or reject the flag, so the first run must be an interactive `pi`
-> session (or `/model`) to populate `models-store.json`. After that, `-p` and RPC see the
-> catalog from the store. This is Pi's behavior, not this package's.
+Ollama ships an official JavaScript client. It was evaluated — the published `ollama@0.6.4`
+artifact — and deliberately not adopted: it speaks the same `/api/*` wire and covers none of what a
+Pi provider has to honor.
 
-## How requests map
-
-| Pi | Ollama |
-| --- | --- |
-| `contextWindow` | `options.num_ctx` (local only) |
-| `maxTokens` | `options.num_predict` |
-| thinking level | `think` (`false` off, the model's own level name, or `true` when it is boolean-only) |
-| `samplingParams` | merged into `options` last, so they override anything above |
-| tool declarations | `tools[].function` JSON Schema |
-| tool results | `messages[]` with `role: "tool"` |
-
-`/api/chat` streams NDJSON, and the final chunk carries the usage Pi accounts for:
-`prompt_eval_count`, `prompt_eval_cached_count` (reported as cache reads) and `eval_count`.
-Ollama publishes no per-token pricing, so cost is zero.
-
-## Why this adapter does not use `ollama-js`
-
-Ollama ships an official JavaScript client (`ollama-js`, MIT, still pre-1.0). It was evaluated
-and deliberately **not** adopted: it speaks the same `/api/*` wire this adapter already speaks and
-implements none of the contracts a Pi provider has to honor — the ones the retry, header, timeout
-and error handling in `src/client/` exists for.
-
-On the published `ollama@0.6.4` artifact:
-
-| Pi contract | `ollama-js` 0.6.4 |
-| --- | --- |
-| Per-request abort (`AbortSignal`) | `chat(request)` accepts no signal; streaming uses its own controller, and `abort()` cancels **every** in-flight stream on the client. |
-| `onResponse` before the body | The streaming path discards the `Response`, so status and headers are never observable. |
-| Retry policy participation | No retries, and `ResponseError(message, status_code)` carries no `headers`, so Pi's `isProviderError` probe rejects it. |
-| Idle window per chunk (`timeoutMs`) | One `AbortController` for the whole request; the NDJSON reader only awaits `read()`. |
-| Bounded error payload | `checkOk` reads and parses the whole error body before any cap and logs on that path; a malformed stream line is `console.warn`ed and skipped. |
-| Retryable end of stream | Throws a bare `Error("Did not receive done or success response in stream.")`. |
-| Caller headers win | `Config.headers` is per client, not per request, and its `fetch` wrapper replaces caller `Content-Type`/`Accept`/`User-Agent` with `User-Agent: ollama-js/<version>`. |
-
-It also adds a `whatwg-fetch` runtime dependency with a side-effect import, and reads
-`process.env.OLLAMA_API_KEY` on its own for `ollama.com`, bypassing the credential Pi resolved.
-What it does not save is the actual adapter work: chunk-to-event translation, usage accounting and
-the transcript transform stay here either way.
+- **No per-request abort.** `chat()` takes no `AbortSignal`, and `abort()` cancels every in-flight
+  stream on the client at once.
+- **No status or headers.** The streaming path discards the `Response`, so the status code and
+  `retry-after` are never visible.
+- **No retry participation.** `ResponseError` carries a status code but no headers, so Pi cannot
+  tell whether an error is retryable.
+- **No per-chunk idle window.** One controller for the whole request, not one wait at a time.
+- **Unbounded error bodies**, and a truncated stream thrown as a bare `Error`.
+- **Its own environment.** It brings a `whatwg-fetch` side-effect import and reads
+  `process.env.OLLAMA_API_KEY` itself, next to the key Pi resolved.
 
 Two things would reopen this decision: `ollama-js` accepting a per-request `AbortSignal`, and its
-errors carrying `status` and `headers`. Those are the only blockers a client library could remove;
-the rest of the handling here exists for Pi's contracts, not for the wire.
-
-## Known limits
-
-- Ollama returns tool calls without ids and matches tool results positionally, so Pi's ids are
-  synthesized per assistant message (`ollama_call_0`, ...). They are stable within a session but
-  not across providers.
-- Images inside tool results are dropped with an explicit text marker, because Ollama tool
-  messages take text only. User images are sent normally.
-- A stream that closes without a `done` chunk is reported as an error, never as a completed
-  response.
-- Cloud requests do not send `num_ctx`: the hosted service manages its own context.
-- **A local context window is an allocation, not just a limit.** `model.contextWindow` travels as
-  `options.num_ctx`, so asking a model for a window larger than the memory it can get either stops
-  it from loading or spills it to CPU. Two escape hatches: `samplingParams.num_ctx` (merged last,
-  so it wins) or a smaller `contextWindow` in the catalog. This is one of the reasons the adapter
-  speaks `/api/chat` instead of the OpenAI-compatible `/v1` shim, which drops `num_ctx` and
-  replaces the per-chunk idle window with a global one.
-- **`timeoutMs` measures the server, not the caller.** The budget covers the wait from the request
-  until the response headers and then each wait between two chunks; decoding, consumer work and
-  `onResponse` never count against it. Pi passes its own budget here — `retry.provider.timeoutMs`
-  when set, otherwise the `httpIdleTimeoutMs` global setting (300 s by default) — so a body that
-  stalls between chunks is bounded by that value, not by the adapter.
-- **A server-requested wait longer than the retry budget is reported, not waited out.** If a
-  response's `retry-after` exceeds `retry.provider.maxRetryDelayMs` (60 s by default), the adapter
-  raises the server's own error with the asked delay — `429: rate limited (the server asked to retry
-  after 90s)` — and Pi's turn retry takes over with its own backoff. Setting
-  `retry.provider.maxRetryDelayMs: 0` respects the request in full instead: no ceiling, and no notice
-  while it waits (the turn stays abortable).
-
-## Vendored helpers
-
-Two pure helpers from `@earendil-works/pi-ai` live in `vendor/pi-ai/`, byte-identical to the
-installed package and copied rather than imported:
-
-| Vendored file | What it provides |
-| --- | --- |
-| `api/transform-messages.js` | `transformMessages`: drops errored and aborted turns, closes orphaned tool calls, downgrades images the model cannot read |
-| `utils/provider-retry.js` | `retryProviderRequest`: the OpenAI/Anthropic retry policy (408/409/429/5xx, `retry-after`, `x-should-retry`) with an interruptible backoff |
-
-Both are MIT (see `vendor/pi-ai/LICENSE`) and both ship in the package, because `files` includes
-`vendor/`. Copying is a loader constraint, not a preference: Pi's extension loader maps only
-`@earendil-works/pi-ai` and its four documented subpaths (`/compat`, `/models`, `/oauth`,
-`/providers/all`), so an unmapped subpath would load a second copy of `pi-ai` into the extension in
-a source build and fail outright in the compiled binary, where modules are virtual and nothing
-exists on disk to import.
-
-`npm run vendor:check` hashes the six vendored files against the installed `pi-ai` and fails on
-drift; when it does, read the upstream change and copy the new bytes over instead of editing the
-copies. If upstream ever exports both functions from the package root, delete `vendor/` and import
-them.
-
-## Development
-
-```bash
-npm install
-npm test          # vitest, offline, against a fake Ollama server
-npm run typecheck
-npm run vendor:check   # the vendored Pi helpers still match the installed pi-ai
-```
-
-The tests replay recorded NDJSON through `tests/helpers/fake-ollama.ts`; no server or key is
-needed for them.
+errors carrying `status` and `headers`. Those are the only parts a client library could remove;
+everything else here exists for Pi's contracts.
 
 ## License
 
-GPL-3.0-only. The vendored helpers under `vendor/pi-ai/` keep their MIT license (see
-`vendor/pi-ai/LICENSE`), which the GPL allows; both travel in the package.
+GPL-3.0-only. The helpers under `vendor/pi-ai/` keep their MIT license (see `vendor/pi-ai/LICENSE`);
+both travel in the package.
