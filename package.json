@@ -3,7 +3,16 @@
 	"version": "0.1.0",
 	"description": "Native Ollama provider for Pi: local and Ollama Cloud through the Ollama API",
 	"type": "module",
-	"license": "MIT",
+	"license": "GPL-3.0-only",
+	"author": "Jahir Vidrio (https://github.com/jahirvidrio)",
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/jahirvidrio/pi-ollama-provider.git"
+	},
+	"homepage": "https://github.com/jahirvidrio/pi-ollama-provider#readme",
+	"bugs": {
+		"url": "https://github.com/jahirvidrio/pi-ollama-provider/issues"
+	},
 	"keywords": [
 		"pi-package",
 		"pi",
@@ -20,6 +29,7 @@
 		"src",
 		"vendor",
 		"README.md",
+		"CHANGELOG.md",
 		"LICENSE"
 	],
 	"scripts": {
@@ -30,8 +40,8 @@
 		"vendor:check": "node scripts/vendor-check.mjs"
 	},
 	"peerDependencies": {
-		"@earendil-works/pi-ai": "*",
-		"@earendil-works/pi-coding-agent": "*"
+		"@earendil-works/pi-ai": ">=1.4.0 <2",
+		"@earendil-works/pi-coding-agent": ">=1.4.0 <2"
 	},
 	"devDependencies": {
 		"@earendil-works/pi-ai": "1.4.0",
