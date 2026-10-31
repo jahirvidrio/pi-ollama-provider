@@ -1,7 +1,11 @@
-import { neostandard } from 'neostandard'
+import { defineConfig, globalIgnores } from 'eslint/config';
+import { neostandard } from 'neostandard';
 
-export default neostandard({
-  ts: true,
-  semi: true,
-  files: ['src/**/*.ts', 'tests/**/*.ts'],
-})
+export default defineConfig([
+  globalIgnores(['vendor/**']),
+  neostandard({
+    ts: true,
+    semi: true,
+    files: ['extensions/**/*.ts', 'src/**/*.ts', 'tests/**/*.ts'],
+  }),
+]);

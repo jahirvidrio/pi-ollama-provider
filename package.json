@@ -23,7 +23,7 @@
 		"LICENSE"
 	],
 	"scripts": {
-		"lint": "eslint src tests",
+		"lint": "eslint",
 		"test": "vitest --run",
 		"test:watch": "vitest",
 		"typecheck": "tsc --noEmit",
