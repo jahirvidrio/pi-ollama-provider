@@ -11,13 +11,19 @@ Two independent providers are registered:
 | `ollama` | `OLLAMA_HOST`, `http://localhost:11434/` by default | none (local server) |
 | `ollama-cloud` | `OLLAMA_CLOUD_HOST`, `https://ollama.com/` by default | `OLLAMA_API_KEY` or a stored credential |
 
+Status: `0.1.0`, beta — what ships here is the Pi provider contract, which can still move. The
+cloud path is verified live (catalog discovery, text, thinking levels and a tool call), while the
+local path is covered by the contract tests against a fake server. Built and tested against
+`@earendil-works/pi-ai` 1.4.0; the copies under `vendor/` are checked against the installed package
+by `npm run vendor:check`.
+
 ## Install
 
 ```bash
 pi install npm:pi-ollama-provider
 ```
 
-Or try it for one run:
+From a checkout, without installing:
 
 ```bash
 pi -e ./extensions/ollama/index.ts
@@ -25,38 +31,44 @@ pi -e ./extensions/ollama/index.ts
 
 ## Configure
 
-Each provider reads its endpoint from its own variable, at request time. Nothing about the
-endpoint is stored in `auth.json`.
+Nothing about an endpoint is ever stored in `auth.json`: each provider reads its own variable at
+request time, on every call.
 
-Local works with no configuration. Point it elsewhere with `OLLAMA_HOST`:
+### Ollama Cloud
+
+Cloud needs a key. The recommended path is `/login ollama-cloud` inside Pi, which verifies the key
+against the server before storing it; create one at
+[ollama.com/settings/keys](https://ollama.com/settings/keys).
+
+When the key should not live on disk, export it instead — it is read on every request, which is what
+CI and other managed environments need:
 
 ```bash
-# default: http://localhost:11434/
-export OLLAMA_HOST=http://192.168.1.10:11434
-```
-
-Cloud needs a key. Either run `/login ollama-cloud` and paste it, or export it:
-
-```bash
-# default: https://ollama.com/
-export OLLAMA_CLOUD_HOST=https://proxy.example.com/ollama
 export OLLAMA_API_KEY=...
 ```
 
-`OLLAMA_CLOUD_HOST` is what a private deployment or a proxy in front of the hosted API needs; it
-does not move the local provider, and `OLLAMA_HOST` does not move cloud. Both variables accept an
-origin, an origin with a path, or an `/api` base URL, and the adapter normalizes them.
+The key goes to `https://ollama.com/` by default. A private deployment or a proxy in front of the
+hosted API is one variable:
 
-The cloud key lives in `auth.json` only if you ran `/login ollama-cloud`; the endpoint never does:
-
-```json
-{
-  "ollama-cloud": {
-    "type": "api_key",
-    "key": "..."
-  }
-}
+```bash
+export OLLAMA_CLOUD_HOST=https://proxy.example.com/ollama
 ```
+
+Point that variable only at a server you trust: the key travels with it.
+
+### Ollama (local)
+
+Local works with no configuration. It takes its host from `OLLAMA_HOST`, so pointing it at another
+machine is one variable:
+
+```bash
+export OLLAMA_HOST=http://192.168.1.10:11434
+```
+
+The two variables are independent: `OLLAMA_HOST` does not move cloud, and `OLLAMA_CLOUD_HOST` does
+not move the local provider. Both accept an origin, an origin with a path, or an `/api` base URL,
+and the adapter normalizes them. Nothing about the endpoint is persisted either, so a host stored
+by an older `/login ollama` is simply not consulted.
 
 ## Use the catalog
 
@@ -90,7 +102,7 @@ Ollama publishes no per-token pricing, so cost is zero.
 Ollama ships an official JavaScript client (`ollama-js`, MIT, still pre-1.0). It was evaluated
 and deliberately **not** adopted: it speaks the same `/api/*` wire this adapter already speaks and
 implements none of the contracts a Pi provider has to honor — the ones the retry, header, timeout
-and error handling in `src/client.ts` exists for.
+and error handling in `src/client/` exists for.
 
 On the published `ollama@0.6.4` artifact:
 
@@ -109,8 +121,9 @@ It also adds a `whatwg-fetch` runtime dependency with a side-effect import, and 
 What it does not save is the actual adapter work: chunk-to-event translation, usage accounting and
 the transcript transform stay here either way.
 
-The full record — the rejected alternatives and the trigger that would reopen this decision — is
-ADR 0003 in the project's decision log.
+Two things would reopen this decision: `ollama-js` accepting a per-request `AbortSignal`, and its
+errors carrying `status` and `headers`. Those are the only blockers a client library could remove;
+the rest of the handling here exists for Pi's contracts, not for the wire.
 
 ## Known limits
 
@@ -133,6 +146,12 @@ ADR 0003 in the project's decision log.
   `onResponse` never count against it. Pi passes its own budget here — `retry.provider.timeoutMs`
   when set, otherwise the `httpIdleTimeoutMs` global setting (300 s by default) — so a body that
   stalls between chunks is bounded by that value, not by the adapter.
+- **A server-requested wait longer than the retry budget is reported, not waited out.** If a
+  response's `retry-after` exceeds `retry.provider.maxRetryDelayMs` (60 s by default), the adapter
+  raises the server's own error with the asked delay — `429: rate limited (the server asked to retry
+  after 90s)` — and Pi's turn retry takes over with its own backoff. Setting
+  `retry.provider.maxRetryDelayMs: 0` respects the request in full instead: no ceiling, and no notice
+  while it waits (the turn stays abortable).
 
 ## Vendored helpers
 
@@ -170,4 +189,5 @@ needed for them.
 
 ## License
 
-MIT
+GPL-3.0-only. The vendored helpers under `vendor/pi-ai/` keep their MIT license (see
+`vendor/pi-ai/LICENSE`), which the GPL allows; both travel in the package.
