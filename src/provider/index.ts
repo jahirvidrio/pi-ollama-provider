@@ -76,7 +76,7 @@ async function fetchModels (
     return restored;
   }
   // This context has no env accessor, so the endpoint comes from `process.env` directly; the auth
-  // path reads the same variable through `AuthContext` (ADR 0007).
+  // path reads the same variable through `AuthContext`.
   const client = createClient(
     baseUrlOf(profile, process.env[profile.hostEnv]),
     { apiKey: credential.key },

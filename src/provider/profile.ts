@@ -15,7 +15,7 @@ export const DEFAULT_OLLAMA_CLOUD_BASE_URL = 'https://ollama.com/api';
 
 /** Ambient variable that names the local server. */
 export const OLLAMA_HOST_ENV = 'OLLAMA_HOST';
-/** Cloud has its own variable, so one environment cannot move both providers (ADR 0007). */
+/** Cloud has its own variable, so one environment cannot move both providers. */
 export const OLLAMA_CLOUD_HOST_ENV = 'OLLAMA_CLOUD_HOST';
 /** Ambient fallback for the cloud key, so the key can stay out of `auth.json`. */
 export const OLLAMA_API_KEY_ENV = 'OLLAMA_API_KEY';
@@ -35,7 +35,7 @@ export interface ResolvedKey {
 /**
  * One deployment flavor behind one interface: everything the two providers answer differently.
  * The endpoint is not part of the contract beyond naming its variable, because the endpoint is
- * configuration read at request time (ADR 0007); normalizing it is shared work in
+ * configuration read at request time; normalizing it is shared work in
  * {@link baseUrlOf}, not something each profile reimplements.
  */
 export interface ProviderProfile {

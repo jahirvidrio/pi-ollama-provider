@@ -8,7 +8,7 @@
  * stored-catalog fallback in `loadCatalog` would never fire and the provider would stay without
  * models. A stalled request costs its model its metadata, a stalled `/api/tags` costs this refresh
  * its network path, and the next refresh retries by itself: the catalog is best-effort and never
- * retried inside one refresh (ADR 0004).
+ * retried inside one refresh.
  */
 export const CATALOG_TIMEOUT_MS = 30_000;
 

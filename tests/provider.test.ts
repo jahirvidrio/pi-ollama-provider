@@ -273,7 +273,7 @@ describe('ollama provider catalog', () => {
       // A server that accepts the connection and never answers must degrade to the stored
       // catalog, not hold the provider's list hostage forever.
       expect(provider.getModels()).toEqual([stored]);
-      // The catalog is best-effort: no retry after the deadline (ADR 0004).
+      // The catalog is best-effort: no retry after the deadline.
       expect(server.requests.filter((request) => request.path === '/api/tags')).toHaveLength(1);
     } finally {
       vi.unstubAllEnvs();

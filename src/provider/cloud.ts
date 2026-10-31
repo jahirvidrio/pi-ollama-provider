@@ -45,7 +45,7 @@ export class CloudProfile implements ProviderProfile {
       { apiKey: key || undefined },
       { timeoutMs: this.loginMs }
     ).listModels(interaction.signal);
-    // The key and nothing else: the endpoint stays whatever the environment names (ADR 0007).
+    // The key and nothing else: the endpoint stays whatever the environment names.
     return { type: 'api_key', key: key || undefined };
   };
 }
