@@ -1,0 +1,4 @@
+# npm rewrites this on every install and it is never published: keep it out of the review diff and
+# out of the language statistics. Deliberately not `-diff`, which would make it binary and hide
+# dependency changes from review.
+package-lock.json linguist-generated=true
