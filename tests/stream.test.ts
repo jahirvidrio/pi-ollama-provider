@@ -243,6 +243,199 @@ describe('streamOllamaChat', () => {
     }
   });
 
+  it('keeps two tool calls delivered one per chunk', async () => {
+    const server = await startFakeOllama({
+      chat: {
+        chunks: [
+          {
+            message: {
+              role: 'assistant',
+              content: '',
+              tool_calls: [{ function: { name: 'read', arguments: { path: 'a.ts' } } }],
+            },
+            done: false,
+          },
+          {
+            message: {
+              role: 'assistant',
+              content: '',
+              tool_calls: [{ function: { name: 'grep', arguments: { pattern: 'needle' } } }],
+            },
+            done: false,
+          },
+          { message: { role: 'assistant', content: '' }, done: true, done_reason: 'stop' },
+        ],
+      },
+    });
+    try {
+      const events = await collect(streamOllamaChat(model({ baseUrl: server.baseUrl }), context()));
+
+      expect(types(events)).toEqual([
+        'start',
+        'toolcall_start',
+        'toolcall_end',
+        'toolcall_start',
+        'toolcall_end',
+        'done',
+      ]);
+      expect(lastMessage(events).content).toEqual([
+        { type: 'toolCall', id: 'ollama_call_0', name: 'read', arguments: { path: 'a.ts' } },
+        { type: 'toolCall', id: 'ollama_call_1', name: 'grep', arguments: { pattern: 'needle' } },
+      ]);
+      expect(lastMessage(events).stopReason).toBe('toolUse');
+    } finally {
+      await server.stop();
+    }
+  });
+
+  it('keeps each call on its own position when arguments arrive later', async () => {
+    const server = await startFakeOllama({
+      chat: {
+        chunks: [
+          {
+            message: {
+              role: 'assistant',
+              content: '',
+              tool_calls: [
+                { function: { name: 'read', arguments: {} } },
+                { function: { name: 'grep', arguments: {} } },
+              ],
+            },
+            done: false,
+          },
+          {
+            message: {
+              role: 'assistant',
+              content: '',
+              tool_calls: [
+                { function: { arguments: { path: 'a.ts' } } },
+                { function: { arguments: { pattern: 'needle' } } },
+              ],
+            },
+            done: false,
+          },
+          { message: { role: 'assistant', content: '' }, done: true, done_reason: 'stop' },
+        ],
+      },
+    });
+    try {
+      const events = await collect(streamOllamaChat(model({ baseUrl: server.baseUrl }), context()));
+
+      expect(lastMessage(events).content).toEqual([
+        { type: 'toolCall', id: 'ollama_call_0', name: 'read', arguments: { path: 'a.ts' } },
+        { type: 'toolCall', id: 'ollama_call_1', name: 'grep', arguments: { pattern: 'needle' } },
+      ]);
+    } finally {
+      await server.stop();
+    }
+  });
+
+  it('reassembles a split call whose fragments repeat the name', async () => {
+    const server = await startFakeOllama({
+      chat: {
+        chunks: [
+          {
+            message: {
+              role: 'assistant',
+              content: '',
+              tool_calls: [{ function: { name: 'read', arguments: { path: 'a.ts' } } }],
+            },
+            done: false,
+          },
+          {
+            message: {
+              role: 'assistant',
+              content: '',
+              tool_calls: [{ function: { name: 'read', arguments: { limit: 5 } } }],
+            },
+            done: false,
+          },
+          { message: { role: 'assistant', content: '' }, done: true, done_reason: 'stop' },
+        ],
+      },
+    });
+    try {
+      const events = await collect(streamOllamaChat(model({ baseUrl: server.baseUrl }), context()));
+
+      expect(lastMessage(events).content).toEqual([
+        { type: 'toolCall', id: 'ollama_call_0', name: 'read', arguments: { path: 'a.ts', limit: 5 } },
+      ]);
+    } finally {
+      await server.stop();
+    }
+  });
+
+  it('groups tool-call fragments by the index the server sends', async () => {
+    const server = await startFakeOllama({
+      chat: {
+        chunks: [
+          {
+            message: {
+              role: 'assistant',
+              content: '',
+              tool_calls: [{ index: 0, function: { arguments: { path: 'a.ts' } } }],
+            },
+            done: false,
+          },
+          {
+            message: {
+              role: 'assistant',
+              content: '',
+              tool_calls: [{ index: 0, function: { name: 'read', arguments: {} } }],
+            },
+            done: false,
+          },
+          {
+            message: {
+              role: 'assistant',
+              content: '',
+              tool_calls: [{ index: 1, function: { name: 'grep', arguments: { pattern: 'needle' } } }],
+            },
+            done: false,
+          },
+          { message: { role: 'assistant', content: '' }, done: true, done_reason: 'stop' },
+        ],
+      },
+    });
+    try {
+      const events = await collect(streamOllamaChat(model({ baseUrl: server.baseUrl }), context()));
+
+      expect(lastMessage(events).content).toEqual([
+        { type: 'toolCall', id: 'ollama_call_0', name: 'read', arguments: { path: 'a.ts' } },
+        { type: 'toolCall', id: 'ollama_call_1', name: 'grep', arguments: { pattern: 'needle' } },
+      ]);
+    } finally {
+      await server.stop();
+    }
+  });
+
+  it('uses the id the server sent for the tool call', async () => {
+    const server = await startFakeOllama({
+      chat: {
+        chunks: [
+          {
+            message: {
+              role: 'assistant',
+              content: '',
+              tool_calls: [{ id: 'call_abc123', function: { name: 'read', arguments: { path: 'a.ts' } } }],
+            },
+            done: true,
+            done_reason: 'stop',
+          },
+        ],
+      },
+    });
+    try {
+      const events = await collect(streamOllamaChat(model({ baseUrl: server.baseUrl }), context()));
+
+      expect(lastMessage(events).content).toEqual([
+        { type: 'toolCall', id: 'call_abc123', name: 'read', arguments: { path: 'a.ts' } },
+      ]);
+    } finally {
+      await server.stop();
+    }
+  });
+
   it('parses tool call arguments delivered as a JSON string', async () => {
     const server = await startFakeOllama({
       chat: {

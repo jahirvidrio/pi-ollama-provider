@@ -30,6 +30,12 @@ export interface OllamaShowResponse {
 }
 
 export interface OllamaToolCall {
+  /** The call's position in the assistant message; the stream repeats it on every fragment. */
+  index?: number;
+  /** The server's own id, which lets the adapter keep calls apart without guessing. */
+  id?: string;
+  /** `"function"`, the only kind Ollama sends. */
+  type?: string;
   function: { name: string; arguments?: Record<string, unknown> };
 }
 

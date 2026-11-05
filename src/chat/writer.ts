@@ -11,7 +11,7 @@ import {
 import { OllamaError } from '../errors.ts';
 import type { OllamaChatChunk, OllamaToolCall } from '../wire.ts';
 import { ollamaToolCallToPi } from './convert.ts';
-import { type BufferedToolCall, mergeToolCall } from './toolcalls.ts';
+import { type BufferedToolCall, emptyToolCall, fragmentName, mergeToolCall } from './toolcalls.ts';
 import { usageOf } from './usage.ts';
 
 /** Notice appended to the assistant text when the server sends a tool call Pi cannot run. */
@@ -35,8 +35,12 @@ function errorText (error: unknown, aborted: boolean): string {
 export class TurnWriter {
   private textBlock: TextContent | undefined;
   private thinkingBlock: ThinkingContent | undefined;
-  /** Calls accumulate here by arrival position and are emitted together at `done`. */
-  private readonly toolCalls = new Map<number, BufferedToolCall>();
+  /** Calls keep their arrival order and are emitted together at `done`. */
+  private readonly toolCalls: BufferedToolCall[] = [];
+  /** Fragments repeating the server's `index` land in the same call. */
+  private readonly toolCallsByIndex = new Map<number, BufferedToolCall>();
+  /** Fragments without an `index` continue whatever their array position pointed at. */
+  private readonly toolCallsByPosition = new Map<number, BufferedToolCall>();
   private toolCallCount = 0;
 
   constructor (
@@ -81,11 +85,13 @@ export class TurnWriter {
     });
   }
 
-  /** Buffers fragments by position; a name and its arguments may arrive in different chunks. */
+  /**
+   * Buffers fragments into the call they belong to. `index` wins when the server sends it;
+   * otherwise a fragment continues whatever its array position pointed at, and one naming a
+   * different call opens a new call on that position.
+   */
   buffer (calls: readonly OllamaToolCall[]): void {
-    calls.forEach((call, index) => {
-      this.toolCalls.set(index, mergeToolCall(this.toolCalls.get(index), call));
-    });
+    calls.forEach((call, position) => mergeToolCall(this.slotFor(call, position), call));
   }
 
   /** Flushes the buffered calls, computes the stop reason and ends the stream with `done`. */
@@ -107,6 +113,28 @@ export class TurnWriter {
     this.output.errorMessage = errorText(error, aborted);
     this.stream.push({ type: 'error', reason: this.output.stopReason, error: this.output });
     this.stream.end();
+  }
+
+  private slotFor (fragment: OllamaToolCall, position: number): BufferedToolCall {
+    if (typeof fragment.index === 'number') {
+      const known = this.toolCallsByIndex.get(fragment.index);
+      if (known) return known;
+      const created = this.addToolCall();
+      this.toolCallsByIndex.set(fragment.index, created);
+      return created;
+    }
+    const known = this.toolCallsByPosition.get(position);
+    const name = fragmentName(fragment);
+    if (known && (name === undefined || known.name.length === 0 || known.name === name)) return known;
+    const created = this.addToolCall();
+    this.toolCallsByPosition.set(position, created);
+    return created;
+  }
+
+  private addToolCall (): BufferedToolCall {
+    const created = emptyToolCall();
+    this.toolCalls.push(created);
+    return created;
   }
 
   private openText (): TextContent {
@@ -152,14 +180,14 @@ export class TurnWriter {
   private flushToolCalls (): void {
     const runnable: ToolCall[] = [];
     let dropped = 0;
-    for (const call of this.toolCalls.values()) {
-      if (call.malformed || call.name.length === 0) {
+    for (const buffered of this.toolCalls) {
+      if (buffered.malformed || buffered.name.length === 0) {
         dropped += 1;
         continue;
       }
-      runnable.push(
-        ollamaToolCallToPi({ function: { name: call.name, arguments: call.arguments } }, this.toolCallCount)
-      );
+      const sent: OllamaToolCall = { function: { name: buffered.name, arguments: buffered.arguments } };
+      if (buffered.id !== undefined) sent.id = buffered.id;
+      runnable.push(ollamaToolCallToPi(sent, this.toolCallCount));
       this.toolCallCount += 1;
     }
     if (dropped > 0) {

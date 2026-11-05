@@ -118,14 +118,15 @@ export function toOllamaTools (tools: readonly Tool[]): OllamaToolDefinition[] |
 }
 
 /**
- * Ollama returns tool calls without ids and expects tool results positionally, so Pi's
- * ids are synthesized. `index` must be the call's position within the assistant message
- * to keep the ids stable and unique.
+ * Ollama expects tool results positionally, so Pi's ids are synthesized from the call's position
+ * within the assistant message, which keeps them stable and unique. A stream that carries the
+ * server's own `id` keeps it instead.
  */
 export function ollamaToolCallToPi (call: OllamaToolCall, index: number): ToolCall {
+  const id = call.id !== undefined && call.id.length > 0 ? call.id : `ollama_call_${index}`;
   return {
     type: 'toolCall',
-    id: `ollama_call_${index}`,
+    id,
     name: call.function.name,
     arguments: (call.function.arguments ?? {}) as JsonObject,
   };

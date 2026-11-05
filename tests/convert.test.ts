@@ -167,4 +167,13 @@ describe('ollamaToolCallToPi', () => {
       arguments: {},
     });
   });
+
+  it('prefers the id the server sent over the synthesized one', () => {
+    expect(ollamaToolCallToPi({ id: 'call_abc123', function: { name: 'read' } }, 1)).toEqual({
+      type: 'toolCall',
+      id: 'call_abc123',
+      name: 'read',
+      arguments: {},
+    });
+  });
 });

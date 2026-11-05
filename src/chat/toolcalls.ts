@@ -7,8 +7,21 @@ import type { OllamaToolCall } from '../wire.ts';
 export interface BufferedToolCall {
   name: string;
   arguments: Record<string, unknown>;
+  /** The server's own id for this call, when it sent one. */
+  id?: string;
   /** Set when an arriving fragment broke a rule; a later chunk cannot repair the call. */
   malformed: boolean;
+}
+
+export function emptyToolCall (): BufferedToolCall {
+  return { name: '', arguments: {}, malformed: false };
+}
+
+/** The name a fragment carries, or `undefined` when it continues the call before it. */
+export function fragmentName (fragment: OllamaToolCall): string | undefined {
+  const parts = fragment as { function?: { name?: unknown } };
+  const name = parts.function?.name;
+  return typeof name === 'string' && name.trim().length > 0 ? name : undefined;
 }
 
 /**
@@ -30,18 +43,20 @@ function argumentsOf (value: unknown): { ok: true; value: Record<string, unknown
 }
 
 /**
- * Merges one arriving fragment into the call buffered at the same position. A non-empty name wins
- * over an empty one and arguments merge shallowly, because Ollama may split one call across
- * chunks. A fragment that breaks a rule poisons the whole call: dropping it is safer than handing
- * `validateToolArguments` a call that throws after the turn's text already reached the user.
+ * Merges one arriving fragment into the call buffered for it. A non-empty name wins over an empty
+ * one and arguments merge shallowly, because Ollama splits one call across chunks. A fragment that
+ * breaks a rule poisons the whole call: dropping it is safer than handing `validateToolArguments`
+ * a call that throws after the turn's text already reached the user.
  */
-export function mergeToolCall (into: BufferedToolCall | undefined, fragment: OllamaToolCall): BufferedToolCall {
-  const merged = into ?? { name: '', arguments: {}, malformed: false };
-  const parts = fragment as { function?: { name?: unknown; arguments?: unknown } };
-  const name = parts.function?.name;
-  if (typeof name === 'string' && name.trim().length > 0) merged.name = name;
+export function mergeToolCall (into: BufferedToolCall, fragment: OllamaToolCall): BufferedToolCall {
+  const name = fragmentName(fragment);
+  if (name !== undefined) into.name = name;
+  if (into.id === undefined && typeof fragment.id === 'string' && fragment.id.length > 0) {
+    into.id = fragment.id;
+  }
+  const parts = fragment as { function?: { arguments?: unknown } };
   const incoming = argumentsOf(parts.function?.arguments);
-  if (incoming.ok) merged.arguments = { ...merged.arguments, ...incoming.value };
-  else merged.malformed = true;
-  return merged;
+  if (incoming.ok) into.arguments = { ...into.arguments, ...incoming.value };
+  else into.malformed = true;
+  return into;
 }
